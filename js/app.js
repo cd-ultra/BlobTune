@@ -40,6 +40,11 @@
     exportMidi: document.getElementById('btn-export-midi'),
     midiInput: document.getElementById('midi-input'),
     record: document.getElementById('btn-record'),
+    scaleRoot: document.getElementById('scale-root'),
+    scaleType: document.getElementById('scale-type'),
+    snap: document.getElementById('btn-snap'),
+    saveProject: document.getElementById('btn-save-project'),
+    projectInput: document.getElementById('project-input'),
     undo: document.getElementById('btn-undo'),
     redo: document.getElementById('btn-redo'),
     file: document.getElementById('file-input'),
@@ -72,6 +77,7 @@
     els.export.addEventListener('click', exportWav);
     els.exportMidi.addEventListener('click', exportMidi);
     els.record.addEventListener('click', toggleRecord);
+    els.snap.addEventListener('click', snapToScale);
     els.undo.addEventListener('click', doUndo);
     els.redo.addEventListener('click', doRedo);
     els.zoomIn.addEventListener('click', () => renderer.zoom(1.3, 'x'));
@@ -82,6 +88,11 @@
     els.midiInput.addEventListener('change', (e) => {
       if (e.target.files && e.target.files[0]) importMidi(e.target.files[0]);
       e.target.value = '';   // allow re-importing the same file
+    });
+    els.saveProject.addEventListener('click', saveProject);
+    els.projectInput.addEventListener('change', (e) => {
+      if (e.target.files && e.target.files[0]) loadProject(e.target.files[0]);
+      e.target.value = '';   // allow re-opening the same file
     });
 
     engine.onEnded = () => {
@@ -512,6 +523,52 @@
     setStatus('All pitch edits reset.');
   }
 
+  // ---------- snap-to-scale ----------
+  // Interval sets (semitones from the root) for each supported scale.
+  const SCALES = {
+    major:     [0, 2, 4, 5, 7, 9, 11],
+    minor:     [0, 2, 3, 5, 7, 8, 10],
+    majorPent: [0, 2, 4, 7, 9],
+    minorPent: [0, 3, 5, 7, 10],
+    chromatic: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11],
+  };
+
+  // Nearest MIDI note in the scale to `midi` (ties resolve upward).
+  function nearestInScale(midi, rootPc, intervals) {
+    const inScale = (m) => intervals.indexOf((((m - rootPc) % 12) + 12) % 12) !== -1;
+    if (inScale(midi)) return midi;
+    for (let d = 1; d <= 6; d++) {
+      if (inScale(midi + d)) return midi + d;
+      if (inScale(midi - d)) return midi - d;
+    }
+    return midi;
+  }
+
+  function snapToScale() {
+    if (!notes.length) { setStatus('Nothing to snap yet — load audio, record, or import MIDI first.'); return; }
+    const rootPc = parseInt(els.scaleRoot.value, 10) || 0;
+    const type = els.scaleType.value;
+    const intervals = SCALES[type] || SCALES.major;
+    // Record one undo entry for the whole snap gesture.
+    beginEdit();
+    let changed = 0;
+    for (const n of notes) {
+      const cur = Math.round(n.detectedMidi + n.pitchOffset);
+      let target = nearestInScale(cur, rootPc, intervals);
+      target = Math.max(12, Math.min(84, target)); // keep within C0..C6
+      const newOffset = n.pitchOffset + (target - cur);
+      if (newOffset !== n.pitchOffset) { n.pitchOffset = newOffset; changed++; }
+    }
+    if (changed) commitEdit(); else pendingSnapshot = null;
+    engine.markDirty();
+    renderer.render();
+    onSelectNote(notes.find((n) => n.selected) || null);
+    const rootName = Pitch.NOTE_NAMES[rootPc];
+    const label = els.scaleType.options[els.scaleType.selectedIndex].text;
+    setStatus('Snapped ' + changed + ' of ' + notes.length + ' note' + (notes.length === 1 ? '' : 's') +
+      ' to ' + rootName + ' ' + label + '.');
+  }
+
   // ---------- undo / redo ----------
   // Each history entry is a snapshot of every note's pitchOffset keyed by id,
   // so undo/redo restores pitch edits without touching the audio buffer.
@@ -599,6 +656,105 @@
     } catch (err) {
       setStatus('MIDI export failed: ' + err.message);
     }
+  }
+
+  // ---------- project save / load (.blobtune.json) ----------
+  // A project bundles the original mono audio (as a base64 WAV, so pitch edits
+  // stay fully re-editable at full quality) plus every note's detected pitch,
+  // curve, and user pitch offset. Loading restores the exact editing session.
+  const PROJECT_FORMAT = 'blobtune-project';
+
+  function saveProject() {
+    const dry = engine.getMono();
+    if (!dry || !dry.length) {
+      setStatus('Nothing to save yet — load audio, record, or import MIDI first.');
+      return;
+    }
+    showLoading('Saving project…');
+    setTimeout(() => {
+      try {
+        const wav = DSP.encodeWavPCM16(dry, engine.sampleRate);
+        wav.arrayBuffer().then((ab) => {
+          const project = {
+            format: PROJECT_FORMAT,
+            version: 1,
+            sourceName: sourceName,
+            sampleRate: engine.sampleRate,
+            duration: engine.duration,
+            audioWavBase64: base64FromBytes(new Uint8Array(ab)),
+            notes: notes.map((n) => ({
+              startTime: n.startTime,
+              endTime: n.endTime,
+              detectedMidi: n.detectedMidi,
+              pitchOffset: n.pitchOffset,
+              curve: n.curve,
+            })),
+          };
+          const blob = new Blob([JSON.stringify(project)], { type: 'application/json' });
+          triggerDownload(blob, sourceName + '.blobtune.json');
+          const edits = notes.filter((n) => n.pitchOffset).length;
+          setStatus('Saved ' + sourceName + '.blobtune.json (' + notes.length + ' notes, ' +
+            edits + ' edited, audio embedded).');
+          hideLoading();
+        }).catch((err) => { hideLoading(); setStatus('Save failed: ' + err.message); });
+      } catch (err) { hideLoading(); setStatus('Save failed: ' + err.message); }
+    }, 20);
+  }
+
+  function loadProject(file) {
+    stopPlayback();
+    showLoading('Opening project…');
+    const reader = new FileReader();
+    reader.onload = () => setTimeout(() => {
+      try {
+        const project = JSON.parse(reader.result);
+        if (!project || project.format !== PROJECT_FORMAT) {
+          throw new Error('not a BlobTune project file');
+        }
+        sourceName = project.sourceName || 'project';
+        const bytes = bytesFromBase64(project.audioWavBase64);
+        engine.decode(bytes.buffer)
+          .then((audioBuffer) => {
+            engine.loadAudioBuffer(audioBuffer);
+            notes = (project.notes || []).map((p) => {
+              const n = new Notes.Note(p.startTime, p.endTime, p.detectedMidi, p.curve || []);
+              n.pitchOffset = p.pitchOffset || 0;
+              return n;
+            });
+            engine.setNotes(notes);
+            engine.markDirty();
+            renderer.setNotes(notes, engine.duration);
+            renderer.setPlayhead(0);
+            clearHistory();   // a loaded project starts a fresh undo history
+            hideLoading();
+            const edits = notes.filter((n) => n.pitchOffset).length;
+            setStatus('Opened "' + file.name + '" — ' + notes.length + ' notes (' +
+              edits + ' edited) restored. Play, retune, or export.');
+            els.selection.textContent = '';
+          })
+          .catch((err) => { hideLoading(); setStatus('Could not open project: ' + err.message); });
+      } catch (err) {
+        hideLoading();
+        setStatus('Could not open "' + file.name + '": ' + err.message + '.');
+      }
+    }, 20);
+    reader.readAsText(file);
+  }
+
+  // Base64 <-> bytes helpers (chunked to stay within call-stack limits).
+  function base64FromBytes(bytes) {
+    let bin = '';
+    const chunk = 0x8000;
+    for (let i = 0; i < bytes.length; i += chunk) {
+      bin += String.fromCharCode.apply(null, bytes.subarray(i, i + chunk));
+    }
+    return btoa(bin);
+  }
+  function bytesFromBase64(b64) {
+    const bin = atob(b64);
+    const out = new Uint8Array(bin.length);
+    for (let i = 0; i < bin.length; i++) out[i] = bin.charCodeAt(i);
+    return out;
   }
 
   function triggerDownload(blob, filename) {
