@@ -27,6 +27,7 @@ On load the app **auto-generates a demo melody** and analyzes it, so you immedia
 - **Select a blob** — click it. Its detected note and any edit show in the status bar.
 - **Retune** — drag a selected blob up/down (snaps to semitones), or use **↑ / ↓** arrow keys. The detected-pitch micro-curve moves with it.
 - **Reset edits** — restore every blob to its detected pitch.
+- **Export WAV** — render the edited audio (with all your pitch changes baked in) and download it as a 16-bit PCM `.wav`. The file is named after the source (e.g. `demo-edited.wav`) and matches exactly what you hear on playback.
 - **Zoom** — the **+ / −** buttons, `Ctrl/Cmd + scroll` (time zoom). Plain scroll pans time; `Shift + scroll` pans pitch.
 
 ## Architecture
@@ -40,7 +41,7 @@ The code is deliberately split by responsibility. Modules are plain IIFEs that h
 | `js/pitch.js` | **Pitch detection.** The YIN algorithm over short overlapping Hann-windowed frames, with an RMS silence gate, producing a per-frame pitch track (time, frequency, clarity). Also holds shared music helpers (freq↔MIDI, note names, black-key test). |
 | `js/notes.js` | **The blob/note model.** Segments the per-frame pitch track into `Note` objects by grouping consecutive voiced frames of similar pitch (bridging short unvoiced gaps, dropping too-short blips). Each `Note` keeps its detected pitch, a non-destructive `pitchOffset`, and a detected-pitch curve. |
 | `js/renderer.js` | **The piano-roll UI.** Owns the canvas and the view transform (zoom/scroll), draws the keyboard gutter, time ruler, grid, blobs, pitch curves and playhead, and handles pointer interaction (select + vertical drag to retune). Emits callbacks; knows nothing about audio. |
-| `js/audio.js` | **Playback + pitch editing.** Renders an edited copy of the signal where each retuned note is pitch-shifted (OLA time-stretch + linear resample to preserve duration), plays it via `AudioBufferSourceNode`, and tracks the playhead. |
+| `js/audio.js` | **Playback + pitch editing + export.** Renders an edited copy of the signal where each retuned note is pitch-shifted (OLA time-stretch + linear resample to preserve duration), plays it via `AudioBufferSourceNode`, tracks the playhead, and encodes the edited buffer to a 16-bit PCM WAV blob for download. |
 | `js/app.js` | **Glue.** File/drag-drop loading, the built-in demo melody generator, running detection→segmentation, transport, the playhead animation loop, zoom, keyboard shortcuts and status text. |
 
 ### Signal flow
@@ -76,7 +77,7 @@ This is an educational clone; it intentionally stops well short of Melodyne:
 - **Pitch edits only.** You can retune blobs but not move them in time, split/merge them, or edit formants, amplitude, or timing — real Melodyne does all of this.
 - **Modest pitch-shift quality.** OLA + resample is simple and can smear transients or sound slightly "phasey," especially for large shifts. No formant preservation, so big shifts sound chipmunk-y/dark. A phase vocoder or PSOLA would sound better.
 - **Playback is mono** and re-renders the whole edited buffer on play; large files take a moment.
-- **No undo/redo, no save/export**, no MIDI export.
+- **Export is mono 16-bit WAV only** (matching the mono engine); there's no MP3/other-format or MIDI export, and no undo/redo.
 - **Detection is best on clean, sustained, single-note material** (voice, flute, synth). Noisy or percussive audio yields messy blobs.
 
 ## Why "from scratch"

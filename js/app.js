@@ -14,6 +14,7 @@
   let renderer = null;
   let notes = [];
   let rafId = null;
+  let sourceName = 'demo';   // base filename used when exporting
 
   const els = {
     canvas: document.getElementById('piano-roll'),
@@ -21,6 +22,7 @@
     stop: document.getElementById('btn-stop'),
     demo: document.getElementById('btn-demo'),
     reset: document.getElementById('btn-reset'),
+    export: document.getElementById('btn-export'),
     file: document.getElementById('file-input'),
     zoomIn: document.getElementById('zoom-in'),
     zoomOut: document.getElementById('zoom-out'),
@@ -44,6 +46,7 @@
     els.stop.addEventListener('click', stopPlayback);
     els.demo.addEventListener('click', loadDemo);
     els.reset.addEventListener('click', resetEdits);
+    els.export.addEventListener('click', exportWav);
     els.zoomIn.addEventListener('click', () => renderer.zoom(1.3, 'x'));
     els.zoomOut.addEventListener('click', () => renderer.zoom(1 / 1.3, 'x'));
     els.file.addEventListener('change', (e) => {
@@ -73,6 +76,7 @@
 
   function loadFile(file) {
     stopPlayback();
+    sourceName = file.name.replace(/\.[^.]+$/, '') || 'audio';
     showLoading('Decoding ' + file.name + '…');
     const reader = new FileReader();
     reader.onload = () => {
@@ -94,6 +98,7 @@
 
   function loadDemo() {
     stopPlayback();
+    sourceName = 'demo';
     showLoading('Generating demo…');
     const sr = 44100;
     const samples = generateDemoMelody(sr);
@@ -207,6 +212,44 @@
     renderer.render();
     onSelectNote(null);
     setStatus('All pitch edits reset.');
+  }
+
+  // ---------- export ----------
+  function exportWav() {
+    if (!engine.getMono() || !engine.getMono().length) {
+      setStatus('Nothing to export yet — load audio or the demo first.');
+      return;
+    }
+    const wasPlaying = engine.isPlaying;
+    if (wasPlaying) { engine.pause(); setPlaying(false); }
+    showLoading('Rendering WAV…');
+    // Defer so the overlay paints before the (sync) render/encode.
+    setTimeout(() => {
+      try {
+        const samples = engine.getEditedSamples();
+        const blob = DSP.encodeWavPCM16(samples, engine.sampleRate);
+        const edits = notes.filter((n) => n.pitchOffset).length;
+        triggerDownload(blob, sourceName + '-edited.wav');
+        setStatus('Exported ' + sourceName + '-edited.wav (' + engine.duration.toFixed(1) +
+          's, ' + edits + ' edited note' + (edits === 1 ? '' : 's') + ').');
+      } catch (err) {
+        setStatus('Export failed: ' + err.message);
+      } finally {
+        hideLoading();
+      }
+    }, 20);
+  }
+
+  function triggerDownload(blob, filename) {
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = filename;
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    // Revoke on the next tick so the download has a chance to start.
+    setTimeout(() => URL.revokeObjectURL(url), 1000);
   }
 
   // ---------- drag & drop ----------
