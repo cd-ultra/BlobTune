@@ -37,6 +37,9 @@
     exportMidi: document.getElementById('btn-export-midi'),
     midiInput: document.getElementById('midi-input'),
     record: document.getElementById('btn-record'),
+    scaleRoot: document.getElementById('scale-root'),
+    scaleType: document.getElementById('scale-type'),
+    snap: document.getElementById('btn-snap'),
     file: document.getElementById('file-input'),
     zoomIn: document.getElementById('zoom-in'),
     zoomOut: document.getElementById('zoom-out'),
@@ -65,6 +68,7 @@
     els.export.addEventListener('click', exportWav);
     els.exportMidi.addEventListener('click', exportMidi);
     els.record.addEventListener('click', toggleRecord);
+    els.snap.addEventListener('click', snapToScale);
     els.zoomIn.addEventListener('click', () => renderer.zoom(1.3, 'x'));
     els.zoomOut.addEventListener('click', () => renderer.zoom(1 / 1.3, 'x'));
     els.file.addEventListener('change', (e) => {
@@ -491,6 +495,49 @@
     renderer.render();
     onSelectNote(null);
     setStatus('All pitch edits reset.');
+  }
+
+  // ---------- snap-to-scale ----------
+  // Interval sets (semitones from the root) for each supported scale.
+  const SCALES = {
+    major:     [0, 2, 4, 5, 7, 9, 11],
+    minor:     [0, 2, 3, 5, 7, 8, 10],
+    majorPent: [0, 2, 4, 7, 9],
+    minorPent: [0, 3, 5, 7, 10],
+    chromatic: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11],
+  };
+
+  // Nearest MIDI note in the scale to `midi` (ties resolve upward).
+  function nearestInScale(midi, rootPc, intervals) {
+    const inScale = (m) => intervals.indexOf((((m - rootPc) % 12) + 12) % 12) !== -1;
+    if (inScale(midi)) return midi;
+    for (let d = 1; d <= 6; d++) {
+      if (inScale(midi + d)) return midi + d;
+      if (inScale(midi - d)) return midi - d;
+    }
+    return midi;
+  }
+
+  function snapToScale() {
+    if (!notes.length) { setStatus('Nothing to snap yet — load audio, record, or import MIDI first.'); return; }
+    const rootPc = parseInt(els.scaleRoot.value, 10) || 0;
+    const type = els.scaleType.value;
+    const intervals = SCALES[type] || SCALES.major;
+    let changed = 0;
+    for (const n of notes) {
+      const cur = Math.round(n.detectedMidi + n.pitchOffset);
+      let target = nearestInScale(cur, rootPc, intervals);
+      target = Math.max(12, Math.min(84, target)); // keep within C0..C6
+      const newOffset = n.pitchOffset + (target - cur);
+      if (newOffset !== n.pitchOffset) { n.pitchOffset = newOffset; changed++; }
+    }
+    engine.markDirty();
+    renderer.render();
+    onSelectNote(notes.find((n) => n.selected) || null);
+    const rootName = Pitch.NOTE_NAMES[rootPc];
+    const label = els.scaleType.options[els.scaleType.selectedIndex].text;
+    setStatus('Snapped ' + changed + ' of ' + notes.length + ' note' + (notes.length === 1 ? '' : 's') +
+      ' to ' + rootName + ' ' + label + '.');
   }
 
   // ---------- export ----------
