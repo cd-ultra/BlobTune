@@ -96,6 +96,19 @@ html, body {
 }
 .level-fill.hot { background: linear-gradient(90deg, #d8d84c 0%, #ff5c5c 100%); }
 
+/* Scale-snap controls */
+.scale-group { display: inline-flex; align-items: center; gap: 6px; }
+.tsel {
+  background: var(--panel-2);
+  color: var(--text);
+  border: 1px solid var(--edge);
+  border-radius: 6px;
+  padding: 5px 6px;
+  font-size: 13px;
+  cursor: pointer;
+}
+.tsel:hover { border-color: #3d4859; }
+
 .filebtn {
   background: var(--accent);
   color: #1a1206;
