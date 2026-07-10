@@ -17,13 +17,16 @@ python3 -m http.server 8000
 
 Opening `index.html` directly also works in most browsers (everything is self-contained), but a local server avoids occasional cross-origin quirks.
 
-On load the app **auto-generates a demo melody** and analyzes it, so you immediately see blobs. Click **Demo tone** to regenerate it, or **Load audio** / drag-and-drop a file to analyze your own.
+On load the app **auto-generates a demo melody** and analyzes it, so you immediately see blobs. Click **Demo tone** to regenerate it, **Load audio** / drag-and-drop a file to analyze your own, or **Record** to capture straight from your microphone.
+
+> **Microphone note:** browsers only allow mic access on a *secure context*. Serving from `http://localhost` (as above) or over HTTPS works; a bare `file://` page will have recording disabled. You'll be prompted to grant mic permission the first time.
 
 ## How to use
 
 - **Play / Pause** — the ▶ button or **Space**.
 - **Stop** — the ■ button or **Esc**.
 - **Seek** — click in the time ruler across the top.
+- **Record** — capture from your microphone. Click **Record** to start (the button pulses red and reads **Stop**), click again to finish; the recording is decoded and analyzed into blobs just like a loaded file. Great for singing/whistling/humming a line and correcting it.
 - **Select a blob** — click it. Its detected note and any edit show in the status bar.
 - **Retune** — drag a selected blob up/down (snaps to semitones), or use **↑ / ↓** arrow keys. The detected-pitch micro-curve moves with it.
 - **Reset edits** — restore every blob to its detected pitch.
@@ -42,12 +45,12 @@ The code is deliberately split by responsibility. Modules are plain IIFEs that h
 | `js/notes.js` | **The blob/note model.** Segments the per-frame pitch track into `Note` objects by grouping consecutive voiced frames of similar pitch (bridging short unvoiced gaps, dropping too-short blips). Each `Note` keeps its detected pitch, a non-destructive `pitchOffset`, and a detected-pitch curve. |
 | `js/renderer.js` | **The piano-roll UI.** Owns the canvas and the view transform (zoom/scroll), draws the keyboard gutter, time ruler, grid, blobs, pitch curves and playhead, and handles pointer interaction (select + vertical drag to retune). Emits callbacks; knows nothing about audio. |
 | `js/audio.js` | **Playback + pitch editing + export.** Renders an edited copy of the signal where each retuned note is pitch-shifted (OLA time-stretch + linear resample to preserve duration), plays it via `AudioBufferSourceNode`, tracks the playhead, and encodes the edited buffer to a 16-bit PCM WAV blob for download. |
-| `js/app.js` | **Glue.** File/drag-drop loading, the built-in demo melody generator, running detection→segmentation, transport, the playhead animation loop, zoom, keyboard shortcuts and status text. |
+| `js/app.js` | **Glue.** File/drag-drop loading, **microphone recording** (`getUserMedia` + `MediaRecorder`, decoded through the same pipeline), the built-in demo melody generator, running detection→segmentation, transport, the playhead animation loop, zoom, keyboard shortcuts and status text. |
 
 ### Signal flow
 
 ```
-audio file / demo tone
+audio file / mic recording / demo tone
       │  decodeAudioData / synthesis
       ▼
 mono Float32Array ──► Pitch.detectPitchTrack (YIN)

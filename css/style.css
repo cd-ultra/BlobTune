@@ -63,6 +63,15 @@ html, body {
 .tbtn:active { background: #333d4c; }
 .tbtn.wide { min-width: 90px; }
 .tbtn.playing { color: var(--playhead); border-color: var(--playhead); }
+.tbtn.recording {
+  color: #ff5c5c;
+  border-color: #ff5c5c;
+  animation: rec-pulse 1s ease-in-out infinite;
+}
+@keyframes rec-pulse {
+  0%, 100% { background: var(--panel-2); }
+  50% { background: #3a2226; }
+}
 
 .filebtn {
   background: var(--accent);

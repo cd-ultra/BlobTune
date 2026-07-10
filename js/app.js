@@ -15,6 +15,9 @@
   let notes = [];
   let rafId = null;
   let sourceName = 'demo';   // base filename used when exporting
+  let mediaRecorder = null;  // active MediaRecorder while recording
+  let recChunks = [];        // recorded Blob chunks
+  let recStream = null;      // the live mic MediaStream
 
   const els = {
     canvas: document.getElementById('piano-roll'),
@@ -23,6 +26,7 @@
     demo: document.getElementById('btn-demo'),
     reset: document.getElementById('btn-reset'),
     export: document.getElementById('btn-export'),
+    record: document.getElementById('btn-record'),
     file: document.getElementById('file-input'),
     zoomIn: document.getElementById('zoom-in'),
     zoomOut: document.getElementById('zoom-out'),
@@ -47,6 +51,7 @@
     els.demo.addEventListener('click', loadDemo);
     els.reset.addEventListener('click', resetEdits);
     els.export.addEventListener('click', exportWav);
+    els.record.addEventListener('click', toggleRecord);
     els.zoomIn.addEventListener('click', () => renderer.zoom(1.3, 'x'));
     els.zoomOut.addEventListener('click', () => renderer.zoom(1 / 1.3, 'x'));
     els.file.addEventListener('change', (e) => {
@@ -79,21 +84,25 @@
     sourceName = file.name.replace(/\.[^.]+$/, '') || 'audio';
     showLoading('Decoding ' + file.name + '…');
     const reader = new FileReader();
-    reader.onload = () => {
-      const AC = window.AudioContext || window.webkitAudioContext;
-      const tmp = new AC();
-      tmp.decodeAudioData(reader.result.slice(0))
-        .then((audioBuffer) => {
-          engine.loadAudioBuffer(audioBuffer);
-          setStatus('Analyzing "' + file.name + '" (' + engine.duration.toFixed(1) + 's)…');
-          setTimeout(() => analyzeCurrent('Loaded ' + file.name), 20);
-        })
-        .catch((err) => {
-          hideLoading();
-          setStatus('Could not decode "' + file.name + '": ' + err.message);
-        });
-    };
+    reader.onload = () => decodeAndAnalyze(reader.result, '"' + file.name + '"');
     reader.readAsArrayBuffer(file);
+  }
+
+  // Decode an ArrayBuffer of any browser-supported audio (file or recording),
+  // load it into the engine, and run the detection pipeline.
+  function decodeAndAnalyze(arrayBuffer, label) {
+    const AC = window.AudioContext || window.webkitAudioContext;
+    const tmp = new AC();
+    tmp.decodeAudioData(arrayBuffer.slice(0))
+      .then((audioBuffer) => {
+        engine.loadAudioBuffer(audioBuffer);
+        setStatus('Analyzing ' + label + ' (' + engine.duration.toFixed(1) + 's)…');
+        setTimeout(() => analyzeCurrent('Loaded ' + label), 20);
+      })
+      .catch((err) => {
+        hideLoading();
+        setStatus('Could not decode ' + label + ': ' + err.message);
+      });
   }
 
   function loadDemo() {
@@ -104,6 +113,71 @@
     const samples = generateDemoMelody(sr);
     engine.loadSamples(samples, sr);
     setTimeout(() => analyzeCurrent('Loaded built-in demo melody'), 20);
+  }
+
+  // ---------- microphone recording ----------
+  function toggleRecord() {
+    if (mediaRecorder && mediaRecorder.state === 'recording') {
+      stopRecording();
+      return;
+    }
+    if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia ||
+        typeof MediaRecorder === 'undefined') {
+      setStatus('Recording is not supported in this browser.');
+      return;
+    }
+    navigator.mediaDevices.getUserMedia({ audio: true })
+      .then(startRecording)
+      .catch((err) => {
+        setStatus('Microphone unavailable (' + err.name + '). ' +
+          'Grant mic permission and serve the page over http://localhost or https.');
+      });
+  }
+
+  function startRecording(stream) {
+    stopPlayback();
+    recStream = stream;
+    recChunks = [];
+    try {
+      mediaRecorder = new MediaRecorder(stream);
+    } catch (err) {
+      setStatus('Could not start recorder: ' + err.message);
+      releaseStream();
+      return;
+    }
+    mediaRecorder.ondataavailable = (e) => { if (e.data && e.data.size) recChunks.push(e.data); };
+    mediaRecorder.onstop = onRecordingStop;
+    mediaRecorder.start();
+    els.record.classList.add('recording');
+    els.record.textContent = '■ Stop';
+    setStatus('Recording… click Stop when done. Works best on a clean, single-note line (voice, whistle, one instrument).');
+  }
+
+  function stopRecording() {
+    if (mediaRecorder && mediaRecorder.state === 'recording') mediaRecorder.stop();
+  }
+
+  function onRecordingStop() {
+    const mime = (mediaRecorder && mediaRecorder.mimeType) || 'audio/webm';
+    els.record.classList.remove('recording');
+    els.record.textContent = '● Record';
+    releaseStream();
+    const blob = new Blob(recChunks, { type: mime });
+    recChunks = [];
+    mediaRecorder = null;
+    if (!blob.size) { setStatus('Recording was empty — nothing captured.'); return; }
+    sourceName = 'recording';
+    showLoading('Processing recording…');
+    blob.arrayBuffer()
+      .then((ab) => decodeAndAnalyze(ab, 'microphone recording'))
+      .catch((err) => { hideLoading(); setStatus('Could not read recording: ' + err.message); });
+  }
+
+  function releaseStream() {
+    if (recStream) {
+      recStream.getTracks().forEach((t) => t.stop());
+      recStream = null;
+    }
   }
 
   function analyzeCurrent(doneMsg) {
