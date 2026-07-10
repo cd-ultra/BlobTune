@@ -42,6 +42,8 @@
 
       // Interaction state
       this.drag = null;
+      this.flashKey = null;          // MIDI of the momentarily-highlighted key
+      this._flashTimer = null;
       this.dpr = Math.max(1, global.devicePixelRatio || 1);
 
       this._bindEvents();
@@ -318,6 +320,20 @@
         ctx.fillRect(blackW - 2, yTop, 2, kh);
       }
 
+      // Flash overlay: highlight a key briefly when it is clicked/played.
+      if (this.flashKey != null && this.flashKey >= botM && this.flashKey <= topM) {
+        const m = this.flashKey;
+        const yBottom = this.midiToY(m);
+        const black = global.Pitch.isBlackKey(m);
+        const w = black ? blackW : KEYBOARD_W - 1;
+        const yy = black ? yBottom - sh + inset : yBottom - sh;
+        const hh = black ? sh - inset * 2 : sh;
+        ctx.fillStyle = css('--accent', '#ff8c3b');
+        ctx.globalAlpha = 0.55;
+        ctx.fillRect(0, yy, w, hh);
+        ctx.globalAlpha = 1;
+      }
+
       // Pass 3: labels. Always label C's; label every white key when there is
       // vertical room. Drawn on white keys in dark ink.
       ctx.textBaseline = 'middle';
@@ -408,7 +424,18 @@
         if (this.cb.onSeek) this.cb.onSeek(t);
         return;
       }
-      if (x < KEYBOARD_W) return;
+      // Click on the left keyboard = audition that key's pitch.
+      if (x < KEYBOARD_W) {
+        if (y > RULER_H) {
+          const midi = clamp(Math.floor(this.yToMidi(y)), MIN_MIDI, MAX_MIDI);
+          if (this.cb.onKeyPlay) this.cb.onKeyPlay(midi);
+          this.flashKey = midi;
+          this.render();
+          clearTimeout(this._flashTimer);
+          this._flashTimer = setTimeout(() => { this.flashKey = null; this.render(); }, 160);
+        }
+        return;
+      }
 
       const note = this._hitNote(x, y);
       // Update selection.
@@ -449,7 +476,9 @@
         return;
       }
       // Hover cursor feedback.
-      if (x > KEYBOARD_W && y > RULER_H) {
+      if (x < KEYBOARD_W && y > RULER_H) {
+        this.canvas.style.cursor = 'pointer';   // clickable piano keys
+      } else if (x > KEYBOARD_W && y > RULER_H) {
         this.canvas.style.cursor = this._hitNote(x, y) ? 'ns-resize' : 'crosshair';
       } else {
         this.canvas.style.cursor = 'default';
