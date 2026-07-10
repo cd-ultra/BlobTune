@@ -65,6 +65,7 @@
     renderer = new Renderer(els.canvas, {
       onSelect: onSelectNote,
       onEdit: onEditNote,
+      onKeyPlay: onKeyPlay,
       onEditBegin: beginEdit,
       onSeek: (t) => { engine.seek(t); renderer.setPlayhead(t); },
     });
@@ -507,6 +508,12 @@
     setStatus('Moved ' + Pitch.midiToName(note.detectedMidi) + ' → ' + note.name +
       ' (' + (note.pitchOffset > 0 ? '+' : '') + note.pitchOffset + ' semitones). Press Space to hear it.');
   }
+  // Audition a piano key clicked on the left keyboard gutter.
+  function onKeyPlay(midi) {
+    engine.previewMidi(midi);
+    setStatus('♪ ' + Pitch.midiToName(midi) + ' — click keys on the left to hear pitches.');
+  }
+
   function resetEdits() {
     if (notes.some((n) => n.pitchOffset)) { beginEdit(); commitEdit(); }
     for (const n of notes) n.pitchOffset = 0;

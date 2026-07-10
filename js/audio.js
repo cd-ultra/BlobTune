@@ -171,6 +171,34 @@
       const t = this.startOffset + (this.ctx.currentTime - this.startCtxTime);
       return Math.min(t, this.duration);
     }
+
+    /**
+     * Audition a single pitch: play a short synthesized note at the given MIDI
+     * value (used by the click-to-play piano keyboard). Independent of the loaded
+     * track, so it works even before any audio is loaded.
+     */
+    previewMidi(midi, dur) {
+      const ctx = this._ensureCtx();
+      dur = dur || 0.5;
+      const freq = global.Pitch.midiToFreq(midi);
+      const now = ctx.currentTime;
+      const g = ctx.createGain();
+      g.gain.setValueAtTime(0, now);
+      g.gain.linearRampToValueAtTime(0.22, now + 0.01);
+      g.gain.exponentialRampToValueAtTime(0.0006, now + dur);
+      g.connect(ctx.destination);
+      // A sine plus a softer octave-ish partial for a warmer, piano-ish timbre.
+      const partials = [[1, 1], [2, 0.28], [3, 0.12]];
+      for (const [mult, amp] of partials) {
+        const osc = ctx.createOscillator();
+        osc.type = 'sine';
+        osc.frequency.value = freq * mult;
+        const pg = ctx.createGain();
+        pg.gain.value = amp;
+        osc.connect(pg); pg.connect(g);
+        osc.start(now); osc.stop(now + dur + 0.02);
+      }
+    }
   }
 
   // ---- DSP: OLA time-stretch + resample pitch shifter ----
