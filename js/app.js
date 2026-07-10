@@ -18,6 +18,9 @@
   let mediaRecorder = null;  // active MediaRecorder while recording
   let recChunks = [];        // recorded Blob chunks
   let recStream = null;      // the live mic MediaStream
+  let recStartMs = 0;        // performance.now() when recording started
+  let recTimerId = null;     // interval id for the elapsed-time display
+  let recMime = '';          // negotiated MediaRecorder mimeType
   let meterCtx = null;       // AudioContext driving the input-level meter
   let meterSource = null;    // MediaStreamAudioSourceNode
   let meterAnalyser = null;  // AnalyserNode
@@ -105,9 +108,8 @@
   // Decode an ArrayBuffer of any browser-supported audio (file or recording),
   // load it into the engine, and run the detection pipeline.
   function decodeAndAnalyze(arrayBuffer, label) {
-    const AC = window.AudioContext || window.webkitAudioContext;
-    const tmp = new AC();
-    tmp.decodeAudioData(arrayBuffer.slice(0))
+    // Decode through the engine's single, reused AudioContext (see engine.decode).
+    engine.decode(arrayBuffer)
       .then((audioBuffer) => {
         engine.loadAudioBuffer(audioBuffer);
         setStatus('Analyzing ' + label + ' (' + engine.duration.toFixed(1) + 's)…');
@@ -115,7 +117,8 @@
       })
       .catch((err) => {
         hideLoading();
-        setStatus('Could not decode ' + label + ': ' + err.message);
+        setStatus('Could not decode ' + label + ': ' + (err && err.message || err) +
+          '. The recording may be empty or in an unsupported format.');
       });
   }
 
@@ -191,6 +194,26 @@
   }
 
   // ---------- microphone recording + level meter ----------
+
+  // Pick a container/codec MediaRecorder actually supports on this browser.
+  // Chrome/Firefox favour WebM/Opus; Safari only offers MP4/AAC. Returning ''
+  // lets MediaRecorder fall back to its own default.
+  function pickMimeType() {
+    if (typeof MediaRecorder === 'undefined' ||
+        typeof MediaRecorder.isTypeSupported !== 'function') return '';
+    const candidates = [
+      'audio/webm;codecs=opus',
+      'audio/webm',
+      'audio/ogg;codecs=opus',
+      'audio/mp4;codecs=mp4a.40.2',
+      'audio/mp4',
+    ];
+    for (const t of candidates) {
+      if (MediaRecorder.isTypeSupported(t)) return t;
+    }
+    return '';
+  }
+
   function toggleRecord() {
     if (mediaRecorder && mediaRecorder.state === 'recording') {
       stopRecording();
@@ -198,43 +221,86 @@
     }
     if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia ||
         typeof MediaRecorder === 'undefined') {
-      setStatus('Recording is not supported in this browser.');
+      setStatus('Recording is not supported in this browser. Try a recent Chrome, Edge, Firefox, or Safari.');
       return;
     }
+    els.record.disabled = true;
+    setStatus('Requesting microphone access…');
     navigator.mediaDevices.getUserMedia({ audio: true })
       .then(startRecording)
       .catch((err) => {
-        setStatus('Microphone unavailable (' + err.name + '). ' +
-          'Grant mic permission and serve the page over http://localhost or https.');
+        els.record.disabled = false;
+        const name = err && err.name;
+        if (name === 'NotAllowedError' || name === 'SecurityError') {
+          setStatus('Microphone permission denied. Click the camera/lock icon in the address bar to allow ' +
+            'the mic, then try Record again. (The page must be served over https:// or http://localhost.)');
+        } else if (name === 'NotFoundError' || name === 'OverconstrainedError') {
+          setStatus('No microphone was found. Connect an input device and try again.');
+        } else {
+          setStatus('Microphone unavailable (' + (name || 'error') + '). ' +
+            'Grant mic permission and serve the page over https:// or http://localhost.');
+        }
       });
   }
 
   function startRecording(stream) {
     stopPlayback();
+    els.record.disabled = false;
     recStream = stream;
     recChunks = [];
+    recMime = pickMimeType();
     try {
-      mediaRecorder = new MediaRecorder(stream);
+      mediaRecorder = recMime
+        ? new MediaRecorder(stream, { mimeType: recMime })
+        : new MediaRecorder(stream);
     } catch (err) {
-      setStatus('Could not start recorder: ' + err.message);
-      releaseStream();
-      return;
+      // Fall back to the UA default if the chosen mimeType was rejected.
+      try { mediaRecorder = new MediaRecorder(stream); recMime = ''; }
+      catch (err2) {
+        setStatus('Could not start recorder: ' + (err2.message || err.message));
+        releaseStream();
+        return;
+      }
     }
+    recMime = mediaRecorder.mimeType || recMime;
     mediaRecorder.ondataavailable = (e) => { if (e.data && e.data.size) recChunks.push(e.data); };
     mediaRecorder.onstop = onRecordingStop;
-    mediaRecorder.start();
+    mediaRecorder.onerror = (e) => {
+      setStatus('Recording error: ' + ((e.error && e.error.name) || 'unknown') + '.');
+      stopRecording();
+    };
+    // Timeslice so chunks flush periodically (more robust than a single blob at stop).
+    mediaRecorder.start(250);
+    recStartMs = performance.now();
+    startRecTimer();
     startMeter(stream);
     els.record.classList.add('recording');
-    els.record.textContent = '■ Stop';
     setStatus('Recording… click Stop when done. Works best on a clean, single-note line (voice, whistle, one instrument).');
   }
 
+  function startRecTimer() {
+    updateRecLabel();
+    if (recTimerId) clearInterval(recTimerId);
+    recTimerId = setInterval(updateRecLabel, 200);
+  }
+  function stopRecTimer() {
+    if (recTimerId) { clearInterval(recTimerId); recTimerId = null; }
+  }
+  function updateRecLabel() {
+    const secs = Math.max(0, (performance.now() - recStartMs) / 1000);
+    els.record.textContent = '■ Stop ' + fmt(secs);
+  }
+
   function stopRecording() {
-    if (mediaRecorder && mediaRecorder.state === 'recording') mediaRecorder.stop();
+    if (mediaRecorder && mediaRecorder.state !== 'inactive') {
+      try { mediaRecorder.stop(); } catch (_) {}
+    }
   }
 
   function onRecordingStop() {
-    const mime = (mediaRecorder && mediaRecorder.mimeType) || 'audio/webm';
+    const mime = (mediaRecorder && mediaRecorder.mimeType) || recMime || 'audio/webm';
+    const elapsed = (performance.now() - recStartMs) / 1000;
+    stopRecTimer();
     els.record.classList.remove('recording');
     els.record.textContent = '● Record';
     stopMeter();
@@ -242,12 +308,19 @@
     const blob = new Blob(recChunks, { type: mime });
     recChunks = [];
     mediaRecorder = null;
-    if (!blob.size) { setStatus('Recording was empty — nothing captured.'); return; }
+    if (!blob.size) {
+      setStatus('Recording was empty — nothing was captured. Check that the right microphone is selected and try again.');
+      return;
+    }
+    if (elapsed < 0.35) {
+      setStatus('Recording was too short (' + elapsed.toFixed(2) + 's). Hold Record for at least half a second, then try again.');
+      return;
+    }
     sourceName = 'recording';
     showLoading('Processing recording…');
     blob.arrayBuffer()
       .then((ab) => decodeAndAnalyze(ab, 'microphone recording'))
-      .catch((err) => { hideLoading(); setStatus('Could not read recording: ' + err.message); });
+      .catch((err) => { hideLoading(); setStatus('Could not read recording: ' + (err && err.message || err)); });
   }
 
   function releaseStream() {
@@ -318,7 +391,13 @@
       renderer.setNotes(notes, engine.duration);
       renderer.setPlayhead(0);
       hideLoading();
-      setStatus(doneMsg + ' — detected ' + notes.length + ' notes. Drag a blob up/down to change its pitch.');
+      if (!notes.length) {
+        setStatus(doneMsg + ' — but no clear pitches were detected. Try a louder, cleaner, single-note ' +
+          'line (voice, whistle, or one instrument) and avoid background noise.');
+      } else {
+        setStatus(doneMsg + ' — detected ' + notes.length + ' note' + (notes.length === 1 ? '' : 's') +
+          '. Drag a blob up/down to change its pitch.');
+      }
       els.selection.textContent = '';
     }, 20);
   }

@@ -63,6 +63,20 @@
     setNotes(notes) { this.notes = notes; }
     markDirty() { this.dirty = true; }
 
+    /**
+     * Decode an ArrayBuffer of encoded audio using the engine's own
+     * AudioContext. Reusing the single long-lived context (instead of spinning
+     * up a throwaway one per decode) avoids leaking AudioContexts — browsers
+     * such as Chrome hard-cap the number of live contexts (~6) and then throw
+     * on `new AudioContext()`, which previously broke loading/recording after a
+     * few uses. Returns a Promise<AudioBuffer>.
+     */
+    decode(arrayBuffer) {
+      const ctx = this._ensureCtx();
+      // decodeAudioData detaches its input; hand it a copy so callers keep theirs.
+      return ctx.decodeAudioData(arrayBuffer.slice(0));
+    }
+
     getMono() { return this.dry; }
 
     /**
