@@ -10,7 +10,7 @@ BlobTune loads an audio file (or a built-in demo tone), detects the notes in it 
 
 Hosted on GitHub Pages: **https://cd-ultra.github.io/BlobTune/**
 
-Every push to `main` redeploys automatically via `.github/workflows/pages.yml`. (First-time setup: in the repo, **Settings → Pages → Build and deployment → Source: GitHub Actions**. The workflow attempts to enable this on its first run, but if the deploy job is blocked you may need to flip that toggle once.)
+Served straight from the repository via GitHub Pages' branch deploy — no build step. One-time setup: **Settings → Pages → Build and deployment → Source: Deploy from a branch → `main` / `(root)`**. After that, every push to `main` republishes automatically. (`.nojekyll` tells Pages to skip Jekyll and serve the files as-is.)
 
 ## Running it
 
