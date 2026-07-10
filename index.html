@@ -56,6 +56,11 @@
       </label>
       <button id="btn-export" class="tbtn wide" title="Export the edited audio as a WAV file">⭳ Export WAV</button>
       <button id="btn-export-midi" class="tbtn wide" title="Export the edited notes as a MIDI file">⭳ Export MIDI</button>
+      <button id="btn-save-project" class="tbtn wide" title="Save the whole session (audio + pitch edits) as a .blobtune.json project">⭳ Save project</button>
+      <label class="filebtn ghost" title="Open a saved .blobtune.json project">
+        Open project
+        <input type="file" id="project-input" accept=".json,.blobtune.json,application/json" hidden>
+      </label>
     </div>
 
     <div class="zoom">
