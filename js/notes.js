@@ -44,6 +44,9 @@
     const maxGapFrames = opts.maxGapFrames || 2;        // bridge short unvoiced gaps
 
     const { times, freqs } = track;
+    // How far to grow each blob past its outermost frame centre so it covers the
+    // whole region the pitch is sounding (frames "hear" ~half a window each way).
+    const pad = (track.frameSeconds || (track.hopSeconds || 0.011) * 4) / 2;
     const midis = freqs.map((f) => (f > 0 ? global.Pitch.freqToMidi(f) : null));
 
     const notes = [];
@@ -52,7 +55,7 @@
 
     const flush = () => {
       if (cur && cur.frames.length >= minNoteFrames) {
-        notes.push(buildNote(cur.frames));
+        notes.push(buildNote(cur.frames, pad));
       }
       cur = null;
     };
@@ -83,13 +86,23 @@
     }
     flush();
 
+    // Keep adjacent blobs from overlapping after padding: where two notes would
+    // collide, meet them at the midpoint.
+    for (let i = 1; i < notes.length; i++) {
+      if (notes[i].startTime < notes[i - 1].endTime) {
+        const mid = (notes[i].startTime + notes[i - 1].endTime) / 2;
+        notes[i - 1].endTime = mid;
+        notes[i].startTime = mid;
+      }
+    }
+
     return notes;
   }
 
-  function buildNote(frames) {
-    const startTime = frames[0].t;
-    const hop = frames.length > 1 ? frames[1].t - frames[0].t : 0.011;
-    const endTime = frames[frames.length - 1].t + hop;
+  function buildNote(frames, pad) {
+    pad = pad || 0;
+    const startTime = Math.max(0, frames[0].t - pad);
+    const endTime = frames[frames.length - 1].t + pad;
     const sorted = frames.map((f) => f.midi).sort((a, b) => a - b);
     const median = sorted[Math.floor(sorted.length / 2)];
     const curve = frames.map((f) => ({ t: f.t, midi: f.midi }));
