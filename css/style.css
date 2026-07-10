@@ -73,6 +73,25 @@ html, body {
   50% { background: #3a2226; }
 }
 
+/* Input-level meter shown while recording. */
+.level-meter {
+  width: 84px;
+  height: 12px;
+  border-radius: 6px;
+  background: #171d25;
+  border: 1px solid var(--edge);
+  overflow: hidden;
+  align-self: center;
+}
+.level-fill {
+  height: 100%;
+  width: 0%;
+  border-radius: 6px 0 0 6px;
+  background: linear-gradient(90deg, #3ec46a 0%, #d8d84c 80%);
+  transition: width 0.06s linear;
+}
+.level-fill.hot { background: linear-gradient(90deg, #d8d84c 0%, #ff5c5c 100%); }
+
 .filebtn {
   background: var(--accent);
   color: #1a1206;

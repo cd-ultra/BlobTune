@@ -18,6 +18,11 @@
   let mediaRecorder = null;  // active MediaRecorder while recording
   let recChunks = [];        // recorded Blob chunks
   let recStream = null;      // the live mic MediaStream
+  let meterCtx = null;       // AudioContext driving the input-level meter
+  let meterSource = null;    // MediaStreamAudioSourceNode
+  let meterAnalyser = null;  // AnalyserNode
+  let meterData = null;      // time-domain sample buffer
+  let meterRaf = null;       // RAF id for the meter loop
 
   const els = {
     canvas: document.getElementById('piano-roll'),
@@ -37,6 +42,8 @@
     loadingText: document.getElementById('loading-text'),
     dropHint: document.getElementById('drop-hint'),
     editorWrap: document.getElementById('editor-wrap'),
+    meter: document.getElementById('level-meter'),
+    meterFill: document.getElementById('level-fill'),
   };
 
   function init() {
@@ -115,7 +122,7 @@
     setTimeout(() => analyzeCurrent('Loaded built-in demo melody'), 20);
   }
 
-  // ---------- microphone recording ----------
+  // ---------- microphone recording + level meter ----------
   function toggleRecord() {
     if (mediaRecorder && mediaRecorder.state === 'recording') {
       stopRecording();
@@ -148,6 +155,7 @@
     mediaRecorder.ondataavailable = (e) => { if (e.data && e.data.size) recChunks.push(e.data); };
     mediaRecorder.onstop = onRecordingStop;
     mediaRecorder.start();
+    startMeter(stream);
     els.record.classList.add('recording');
     els.record.textContent = '■ Stop';
     setStatus('Recording… click Stop when done. Works best on a clean, single-note line (voice, whistle, one instrument).');
@@ -161,6 +169,7 @@
     const mime = (mediaRecorder && mediaRecorder.mimeType) || 'audio/webm';
     els.record.classList.remove('recording');
     els.record.textContent = '● Record';
+    stopMeter();
     releaseStream();
     const blob = new Blob(recChunks, { type: mime });
     recChunks = [];
@@ -178,6 +187,55 @@
       recStream.getTracks().forEach((t) => t.stop());
       recStream = null;
     }
+  }
+
+  // Live input-level meter: tap the mic stream with an AnalyserNode and paint
+  // an RMS bar (turning red near clipping) each frame while recording. Purely
+  // a visual aid — failures here never affect the actual recording.
+  function startMeter(stream) {
+    try {
+      const AC = window.AudioContext || window.webkitAudioContext;
+      meterCtx = new AC();
+      // Created inside the getUserMedia promise (past the user gesture), so it
+      // may start suspended; resume it or the graph won't process and the
+      // analyser reads silence.
+      if (meterCtx.state === 'suspended') meterCtx.resume();
+      meterSource = meterCtx.createMediaStreamSource(stream);
+      meterAnalyser = meterCtx.createAnalyser();
+      meterAnalyser.fftSize = 1024;
+      meterData = new Float32Array(meterAnalyser.fftSize);
+      meterSource.connect(meterAnalyser);   // not connected to destination — no monitoring/feedback
+      els.meter.classList.remove('hidden');
+      meterTick();
+    } catch (_) { /* meter is optional */ }
+  }
+
+  function meterTick() {
+    if (!meterAnalyser) return;
+    meterAnalyser.getFloatTimeDomainData(meterData);
+    let sum = 0, peak = 0;
+    for (let i = 0; i < meterData.length; i++) {
+      const v = meterData[i];
+      sum += v * v;
+      const a = v < 0 ? -v : v;
+      if (a > peak) peak = a;
+    }
+    const rms = Math.sqrt(sum / meterData.length);
+    // Mild gain + curve so normal singing fills a good chunk of the bar.
+    const level = Math.min(1, Math.pow(rms * 2.2, 0.7));
+    els.meterFill.style.width = (level * 100).toFixed(1) + '%';
+    els.meterFill.classList.toggle('hot', peak > 0.92);
+    meterRaf = requestAnimationFrame(meterTick);
+  }
+
+  function stopMeter() {
+    if (meterRaf) { cancelAnimationFrame(meterRaf); meterRaf = null; }
+    meterAnalyser = null;
+    meterData = null;
+    if (meterSource) { try { meterSource.disconnect(); } catch (_) {} meterSource = null; }
+    if (meterCtx) { try { meterCtx.close(); } catch (_) {} meterCtx = null; }
+    if (els.meter) els.meter.classList.add('hidden');
+    if (els.meterFill) { els.meterFill.style.width = '0%'; els.meterFill.classList.remove('hot'); }
   }
 
   function analyzeCurrent(doneMsg) {

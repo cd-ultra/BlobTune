@@ -26,7 +26,7 @@ On load the app **auto-generates a demo melody** and analyzes it, so you immedia
 - **Play / Pause** — the ▶ button or **Space**.
 - **Stop** — the ■ button or **Esc**.
 - **Seek** — click in the time ruler across the top.
-- **Record** — capture from your microphone. Click **Record** to start (the button pulses red and reads **Stop**), click again to finish; the recording is decoded and analyzed into blobs just like a loaded file. Great for singing/whistling/humming a line and correcting it.
+- **Record** — capture from your microphone. Click **Record** to start (the button pulses red and reads **Stop**), click again to finish; the recording is decoded and analyzed into blobs just like a loaded file. Great for singing/whistling/humming a line and correcting it. A **live input-level meter** appears next to the button while recording (green → yellow, turning red near clipping) so you can set your level.
 - **Select a blob** — click it. Its detected note and any edit show in the status bar.
 - **Retune** — drag a selected blob up/down (snaps to semitones), or use **↑ / ↓** arrow keys. The detected-pitch micro-curve moves with it.
 - **Reset edits** — restore every blob to its detected pitch.
