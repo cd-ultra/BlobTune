@@ -100,7 +100,9 @@
         if (s1 - s0 < 64) continue;
         const seg = this.dry.subarray(s0, s1);
         const ratio = Math.pow(2, n.pitchOffset / 12);
-        const shifted = pitchShift(seg, ratio);
+        // Pitch-synchronous shift using the note's detected fundamental.
+        const freq = global.Pitch.midiToFreq(n.detectedMidi);
+        const shifted = pitchShift(seg, ratio, sr, freq);
         // Equal-power-ish crossfade at the boundaries to hide seams.
         const fade = Math.min(256, Math.floor((s1 - s0) / 8));
         for (let i = 0; i < shifted.length; i++) {
@@ -201,7 +203,46 @@
     }
   }
 
-  // ---- DSP: OLA time-stretch + resample pitch shifter ----
+  // ---- DSP: TD-PSOLA pitch shifter (with OLA fallback) ----
+
+  /**
+   * Pitch-shift `segment` by `ratio`, preserving duration, using TD-PSOLA
+   * (time-domain pitch-synchronous overlap-add). Because the material is
+   * monophonic and we know the note's fundamental, we lay pitch-synchronous
+   * Hann grains at the input period and re-space them at period/ratio — this
+   * changes pitch without the phasey warble of generic fixed-hop OLA.
+   *
+   * Grains are placed at synthesis marks spaced by P/ratio; each pulls the
+   * analysis grain nearest the SAME time (identity time-map => duration kept).
+   * The window half-width is max(P, synthesis spacing) so grains always keep
+   * >=50% overlap (no amplitude dips), even for downward shifts.
+   */
+  function psolaShift(segment, sampleRate, freq, ratio) {
+    const P = Math.round(sampleRate / freq);           // analysis period (samples)
+    const Ps = Math.max(1, Math.round(P / ratio));     // synthesis period
+    const halfW = Math.max(P, Ps);
+    const win = hann(2 * halfW);
+    const n = segment.length;
+    const out = new Float32Array(n);
+    const norm = new Float32Array(n);
+
+    for (let s = 0; s < n; s += Ps) {
+      // Nearest analysis pitch-mark to this synthesis position (identity time).
+      const a = Math.round(s / P) * P;
+      for (let k = -halfW; k < halfW; k++) {
+        const ai = a + k;
+        const si = s + k;
+        if (ai < 0 || ai >= n || si < 0 || si >= n) continue;
+        const w = win[k + halfW];
+        out[si] += segment[ai] * w;
+        norm[si] += w;
+      }
+    }
+    for (let i = 0; i < n; i++) {
+      out[i] = norm[i] > 1e-6 ? out[i] / norm[i] : segment[i];
+    }
+    return out;
+  }
 
   function hann(n) {
     const w = new Float32Array(n);
@@ -256,10 +297,16 @@
 
   /**
    * Pitch-shift by `ratio` (e.g. 2^(semitones/12)) preserving duration.
-   * Stretch by ratio, then resample back to the original length.
+   * Uses TD-PSOLA when a usable fundamental is known (clean, monophonic);
+   * otherwise falls back to OLA time-stretch + resample.
    */
-  function pitchShift(segment, ratio) {
+  function pitchShift(segment, ratio, sampleRate, freq) {
     if (Math.abs(ratio - 1) < 1e-4) return Float32Array.from(segment);
+    const P = freq > 0 ? Math.round(sampleRate / freq) : 0;
+    // PSOLA needs at least a couple of periods of context inside the segment.
+    if (P >= 4 && segment.length >= 4 * P) {
+      return psolaShift(segment, sampleRate, freq, ratio);
+    }
     const stretched = timeStretch(segment, ratio);
     return resampleTo(stretched, segment.length);
   }
@@ -308,5 +355,5 @@
   }
 
   global.AudioEngine = AudioEngine;
-  global.DSP = { timeStretch, resampleTo, pitchShift, encodeWavPCM16 };
+  global.DSP = { timeStretch, resampleTo, pitchShift, psolaShift, encodeWavPCM16 };
 })(typeof window !== 'undefined' ? window : globalThis);

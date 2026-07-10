@@ -84,7 +84,7 @@
     const threshold = opts.threshold || 0.12;
     const minFreq = opts.minFreq || 65;   // ~C2
     const maxFreq = opts.maxFreq || 1200; // ~D6
-    const clarityFloor = opts.clarityFloor != null ? opts.clarityFloor : 0.90;
+    const clarityFloor = opts.clarityFloor != null ? opts.clarityFloor : 0.85;
 
     const times = [];
     const freqs = [];
@@ -105,11 +105,14 @@
       rmsVals.push(rms);
       if (rms > peakRms) peakRms = rms;
     }
-    const silenceGate = peakRms * 0.06;
+    const silenceGate = peakRms * 0.04;
 
     let idx = 0;
     for (let start = 0; start + frameSize <= samples.length; start += hopSize, idx++) {
-      const t = start / sampleRate;
+      // Time-stamp each estimate at the CENTRE of its analysis window, not the
+      // start — otherwise every note reads ~half a frame late and its blob is
+      // shifted/short relative to where the pitch is actually sounding.
+      const t = (start + frameSize / 2) / sampleRate;
       if (rmsVals[idx] < silenceGate) {
         times.push(t); freqs.push(-1); clarities.push(0);
         continue;
@@ -122,7 +125,11 @@
       clarities.push(voiced ? clarity : 0);
     }
 
-    return { times, freqs, clarities, hopSeconds: hopSize / sampleRate };
+    return {
+      times, freqs, clarities,
+      hopSeconds: hopSize / sampleRate,
+      frameSeconds: frameSize / sampleRate,
+    };
   }
 
   function hannWindow(n) {

@@ -53,7 +53,7 @@ The code is deliberately split by responsibility. Modules are plain IIFEs that h
 | `js/midi.js` | **MIDI import/export.** A tiny Standard MIDI File reader/writer: `encodeMidiFromNotes` writes a format-0 SMF at the notes' edited pitches; `parseMidi` reads format 0/1 (tempo map, running status, note-on/off pairing) into a `{startTime, endTime, midi}` list. |
 | `js/notes.js` | **The blob/note model.** Segments the per-frame pitch track into `Note` objects by grouping consecutive voiced frames of similar pitch (bridging short unvoiced gaps, dropping too-short blips). Each `Note` keeps its detected pitch, a non-destructive `pitchOffset`, and a detected-pitch curve. |
 | `js/renderer.js` | **The piano-roll UI.** Owns the canvas and the view transform (zoom/scroll), draws the keyboard gutter, time ruler, grid, blobs, pitch curves and playhead, and handles pointer interaction (select + vertical drag to retune). Emits callbacks; knows nothing about audio. |
-| `js/audio.js` | **Playback + pitch editing + export.** Renders an edited copy of the signal where each retuned note is pitch-shifted (OLA time-stretch + linear resample to preserve duration), plays it via `AudioBufferSourceNode`, tracks the playhead, and encodes the edited buffer to a 16-bit PCM WAV blob for download. |
+| `js/audio.js` | **Playback + pitch editing + export.** Renders an edited copy of the signal where each retuned note is pitch-shifted with **TD-PSOLA** (pitch-synchronous overlap-add, using the note's detected fundamental; falls back to OLA time-stretch + resample when no pitch is known), plays it via `AudioBufferSourceNode`, tracks the playhead, and encodes the edited buffer to a 16-bit PCM WAV blob for download. |
 | `js/app.js` | **Glue.** File/drag-drop loading, **microphone recording** (`getUserMedia` + `MediaRecorder`, decoded through the same pipeline), the built-in demo melody generator, running detection→segmentation, transport, the playhead animation loop, zoom, keyboard shortcuts and status text. |
 
 ### Signal flow
@@ -81,7 +81,7 @@ mono Float32Array ──► Pitch.detectPitchTrack (YIN)
 
 - **Detection: YIN.** For each frame we compute the difference function, its cumulative-mean-normalized form, take the first dip below an absolute threshold, and parabolically interpolate for a sub-sample period. Clarity = `1 − d'(τ)`. Frames below a relative RMS floor are treated as unvoiced. Defaults: 2048-sample frames, 512-sample hop.
 - **Segmentation.** Consecutive voiced frames within ~0.75 semitone of a running mean become one note; a jump beyond that starts a new one. Short (≤2-frame) unvoiced gaps are bridged; notes shorter than 4 frames are discarded.
-- **Pitch shift.** Per edited note we OLA time-stretch the segment by the pitch ratio (Hann window, frame 1024 / synthesis hop 256) then linearly resample back to the original length, so pitch changes while duration stays put. Boundaries get a short crossfade to reduce clicks.
+- **Pitch shift.** Per edited note we use **TD-PSOLA**: from the note's detected fundamental we lay pitch-synchronous Hann grains (window half-width `max(P, P/ratio)` so grains always keep ≥50% overlap) at the analysis period `P = sampleRate/f` and re-space them at `P/ratio`, each grain pulling the analysis grain nearest the same time — so pitch changes while duration is preserved, without the phasey warble of generic fixed-hop OLA. If a note has no usable pitch, it falls back to OLA time-stretch + resample. Boundaries get a short crossfade to reduce clicks.
 
 ## Known limitations
 
@@ -89,7 +89,7 @@ This is an educational clone; it intentionally stops well short of Melodyne:
 
 - **Monophonic only.** YIN estimates a single fundamental per frame. Chords/polyphony are not separated (Melodyne's DNA is exactly the hard polyphonic case).
 - **Pitch edits only.** You can retune blobs but not move them in time, split/merge them, or edit formants, amplitude, or timing — real Melodyne does all of this.
-- **Modest pitch-shift quality.** OLA + resample is simple and can smear transients or sound slightly "phasey," especially for large shifts. No formant preservation, so big shifts sound chipmunk-y/dark. A phase vocoder or PSOLA would sound better.
+- **No formant preservation.** TD-PSOLA shifts pitch cleanly for monophonic material but doesn't preserve formants, so large shifts still sound chipmunk-y/dark. Very large or noisy/inharmonic shifts can also smear. A phase vocoder with formant correction would go further.
 - **Playback is mono** and re-renders the whole edited buffer on play; large files take a moment.
 - **Audio export is mono 16-bit WAV only** (matching the mono engine); no MP3/other compressed formats, and no undo/redo.
 - **MIDI import synthesizes a plain tone preview**, not the original instrument, and flattens all channels/tracks into one blob list (it's monophonic-minded); overlapping/polyphonic MIDI will draw overlapping blobs and sum in the preview. MIDI export is a fixed 120 BPM, single track.
@@ -97,4 +97,4 @@ This is an educational clone; it intentionally stops well short of Melodyne:
 
 ## Why "from scratch"
 
-Everything here — the YIN implementation, note segmentation, the canvas piano-roll and its interaction, and the OLA pitch shifter — is hand-written with no third-party libraries, so you can read the whole pipeline end to end.
+Everything here — the YIN implementation, note segmentation, the canvas piano-roll and its interaction, and the TD-PSOLA pitch shifter — is hand-written with no third-party libraries, so you can read the whole pipeline end to end.
