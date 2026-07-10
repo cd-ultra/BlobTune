@@ -3,7 +3,7 @@ name: Deploy to GitHub Pages
 # Publishes the static site (repo root) to GitHub Pages on every push to main.
 # BlobTune has no build step, so the whole repo root is uploaded as-is; asset
 # paths are relative, so it serves correctly from the project subpath
-# (https://<owner>.github.io/melodyne-clone/).
+# (https://<owner>.github.io/BlobTune/).
 
 on:
   push:

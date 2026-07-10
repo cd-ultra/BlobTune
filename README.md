@@ -8,7 +8,7 @@ BlobTune loads an audio file (or a built-in demo tone), detects the notes in it 
 
 ## Live demo
 
-Hosted on GitHub Pages: **https://cd-ultra.github.io/melodyne-clone/**
+Hosted on GitHub Pages: **https://cd-ultra.github.io/BlobTune/**
 
 Every push to `main` redeploys automatically via `.github/workflows/pages.yml`. (First-time setup: in the repo, **Settings → Pages → Build and deployment → Source: GitHub Actions**. The workflow attempts to enable this on its first run, but if the deploy job is blocked you may need to flip that toggle once.)
 
