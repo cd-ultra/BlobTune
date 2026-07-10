@@ -442,6 +442,8 @@
       for (const n of this.notes) n.selected = false;
       if (note) {
         note.selected = true;
+        // Let the host snapshot state for undo before a drag mutates pitch.
+        if (this.cb.onEditBegin) this.cb.onEditBegin(note);
         this.drag = {
           note,
           startY: y,
