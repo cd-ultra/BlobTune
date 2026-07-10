@@ -1,0 +1,55 @@
+name: CI
+
+# Lightweight, dependency-free checks for BlobTune (a no-build static app).
+# Runs on PRs to main and on pushes to main, so it can be used as a required
+# status check in a branch-protection ruleset.
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Syntax-check all JavaScript
+        run: |
+          set -e
+          shopt -s nullglob
+          for f in js/*.js; do
+            node --check "$f"
+            echo "ok: $f"
+          done
+
+      - name: No leftover merge-conflict markers
+        run: |
+          if grep -rnE '^(<<<<<<<|>>>>>>>)' \
+               --include='*.js' --include='*.html' --include='*.css' .; then
+            echo "::error::Merge-conflict markers found"
+            exit 1
+          fi
+          echo "no conflict markers"
+
+      - name: Referenced scripts exist
+        run: |
+          set -e
+          missing=0
+          for s in $(grep -oE 'src="js/[^"]+"' index.html | sed 's/src="//; s/"//'); do
+            if [ -f "$s" ]; then
+              echo "exists: $s"
+            else
+              echo "::error::index.html references missing file: $s"
+              missing=1
+            fi
+          done
+          exit $missing
