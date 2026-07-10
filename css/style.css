@@ -63,6 +63,8 @@ html, body {
 }
 .tbtn:hover { background: #2c3542; border-color: #3d4859; }
 .tbtn:active { background: #333d4c; }
+.tbtn:disabled { opacity: 0.4; cursor: default; }
+.tbtn:disabled:hover { background: var(--panel-2); border-color: var(--edge); }
 .tbtn.wide { min-width: 90px; }
 .tbtn.playing { color: var(--playhead); border-color: var(--playhead); }
 .tbtn.recording {

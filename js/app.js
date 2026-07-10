@@ -15,6 +15,9 @@
   let notes = [];
   let rafId = null;
   let sourceName = 'demo';   // base filename used when exporting
+  let undoStack = [];        // history of pitch-edit snapshots
+  let redoStack = [];
+  let pendingSnapshot = null;// state captured at the start of the current edit
   let mediaRecorder = null;  // active MediaRecorder while recording
   let recChunks = [];        // recorded Blob chunks
   let recStream = null;      // the live mic MediaStream
@@ -40,6 +43,8 @@
     scaleRoot: document.getElementById('scale-root'),
     scaleType: document.getElementById('scale-type'),
     snap: document.getElementById('btn-snap'),
+    undo: document.getElementById('btn-undo'),
+    redo: document.getElementById('btn-redo'),
     file: document.getElementById('file-input'),
     zoomIn: document.getElementById('zoom-in'),
     zoomOut: document.getElementById('zoom-out'),
@@ -58,6 +63,7 @@
     renderer = new Renderer(els.canvas, {
       onSelect: onSelectNote,
       onEdit: onEditNote,
+      onEditBegin: beginEdit,
       onSeek: (t) => { engine.seek(t); renderer.setPlayhead(t); },
     });
 
@@ -69,6 +75,8 @@
     els.exportMidi.addEventListener('click', exportMidi);
     els.record.addEventListener('click', toggleRecord);
     els.snap.addEventListener('click', snapToScale);
+    els.undo.addEventListener('click', doUndo);
+    els.redo.addEventListener('click', doRedo);
     els.zoomIn.addEventListener('click', () => renderer.zoom(1.3, 'x'));
     els.zoomOut.addEventListener('click', () => renderer.zoom(1 / 1.3, 'x'));
     els.file.addEventListener('change', (e) => {
@@ -145,6 +153,7 @@
           p.startTime, p.endTime, p.midi,
           [{ t: p.startTime, midi: p.midi }, { t: p.endTime, midi: p.midi }]
         ));
+        clearHistory();
         // Synthesize a matching tone preview so playback and WAV export work.
         const sr = 44100;
         engine.loadSamples(synthesizeFromNotes(notes, sr), sr);
@@ -390,6 +399,7 @@
       const mono = engine.getMono();
       const track = Pitch.detectPitchTrack(mono, engine.sampleRate);
       notes = Notes.segmentNotes(track);
+      clearHistory();
       engine.setNotes(notes);
       engine.markDirty();
       renderer.setNotes(notes, engine.duration);
@@ -484,12 +494,14 @@
     }
   }
   function onEditNote(note) {
+    commitEdit();
     engine.markDirty();
     onSelectNote(note);
     setStatus('Moved ' + Pitch.midiToName(note.detectedMidi) + ' → ' + note.name +
       ' (' + (note.pitchOffset > 0 ? '+' : '') + note.pitchOffset + ' semitones). Press Space to hear it.');
   }
   function resetEdits() {
+    if (notes.some((n) => n.pitchOffset)) { beginEdit(); commitEdit(); }
     for (const n of notes) n.pitchOffset = 0;
     engine.markDirty();
     renderer.render();
@@ -523,6 +535,8 @@
     const rootPc = parseInt(els.scaleRoot.value, 10) || 0;
     const type = els.scaleType.value;
     const intervals = SCALES[type] || SCALES.major;
+    // Record one undo entry for the whole snap gesture.
+    beginEdit();
     let changed = 0;
     for (const n of notes) {
       const cur = Math.round(n.detectedMidi + n.pitchOffset);
@@ -531,6 +545,7 @@
       const newOffset = n.pitchOffset + (target - cur);
       if (newOffset !== n.pitchOffset) { n.pitchOffset = newOffset; changed++; }
     }
+    if (changed) commitEdit(); else pendingSnapshot = null;
     engine.markDirty();
     renderer.render();
     onSelectNote(notes.find((n) => n.selected) || null);
@@ -538,6 +553,53 @@
     const label = els.scaleType.options[els.scaleType.selectedIndex].text;
     setStatus('Snapped ' + changed + ' of ' + notes.length + ' note' + (notes.length === 1 ? '' : 's') +
       ' to ' + rootName + ' ' + label + '.');
+  }
+
+  // ---------- undo / redo ----------
+  // Each history entry is a snapshot of every note's pitchOffset keyed by id,
+  // so undo/redo restores pitch edits without touching the audio buffer.
+  function captureState() { return notes.map((n) => ({ id: n.id, off: n.pitchOffset })); }
+  function restoreState(snap) {
+    const byId = new Map(snap.map((s) => [s.id, s.off]));
+    for (const n of notes) if (byId.has(n.id)) n.pitchOffset = byId.get(n.id);
+  }
+  // Called just before an edit gesture (drag start / arrow / reset) begins.
+  function beginEdit() { if (!pendingSnapshot) pendingSnapshot = captureState(); }
+  // Commit the pending snapshot into the undo stack (clears redo).
+  function commitEdit() {
+    if (!pendingSnapshot) return;
+    undoStack.push(pendingSnapshot);
+    pendingSnapshot = null;
+    redoStack = [];
+    refreshHistoryButtons();
+  }
+  function clearHistory() {
+    undoStack = []; redoStack = []; pendingSnapshot = null;
+    refreshHistoryButtons();
+  }
+  function doUndo() {
+    if (!undoStack.length) return;
+    redoStack.push(captureState());
+    restoreState(undoStack.pop());
+    afterHistoryChange('Undo');
+  }
+  function doRedo() {
+    if (!redoStack.length) return;
+    undoStack.push(captureState());
+    restoreState(redoStack.pop());
+    afterHistoryChange('Redo');
+  }
+  function afterHistoryChange(label) {
+    engine.markDirty();
+    renderer.render();
+    const sel = notes.find((n) => n.selected);
+    onSelectNote(sel || null);
+    refreshHistoryButtons();
+    setStatus(label + ' — ' + notes.filter((n) => n.pitchOffset).length + ' note(s) currently edited.');
+  }
+  function refreshHistoryButtons() {
+    if (els.undo) els.undo.disabled = !undoStack.length;
+    if (els.redo) els.redo.disabled = !redoStack.length;
   }
 
   // ---------- export ----------
@@ -614,6 +676,13 @@
   // ---------- keyboard ----------
   function setupKeyboard() {
     window.addEventListener('keydown', (e) => {
+      const mod = e.ctrlKey || e.metaKey;
+      if (mod && (e.code === 'KeyZ' || e.code === 'KeyY')) {
+        e.preventDefault();
+        if (e.code === 'KeyY' || (e.code === 'KeyZ' && e.shiftKey)) doRedo();
+        else doUndo();
+        return;
+      }
       if (e.code === 'Space') { e.preventDefault(); togglePlay(); }
       else if (e.code === 'Escape') { stopPlayback(); }
       else if (e.code === 'ArrowUp' || e.code === 'ArrowDown') {
@@ -624,6 +693,7 @@
           // Clamp edited pitch within C0 (12) .. C6 (84).
           const eff = sel.detectedMidi + next;
           if (eff >= 12 && eff <= 84) {
+            beginEdit();
             sel.pitchOffset = next;
             onEditNote(sel);
             renderer.render();
