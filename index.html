@@ -32,7 +32,12 @@
       </div>
       <button id="btn-demo" class="tbtn wide" title="Generate a built-in demo melody">Demo tone</button>
       <button id="btn-reset" class="tbtn" title="Reset all pitch edits">Reset edits</button>
+      <label class="filebtn ghost" title="Import a MIDI file as blobs">
+        Import MIDI
+        <input type="file" id="midi-input" accept=".mid,.midi,audio/midi" hidden>
+      </label>
       <button id="btn-export" class="tbtn wide" title="Export the edited audio as a WAV file">⭳ Export WAV</button>
+      <button id="btn-export-midi" class="tbtn wide" title="Export the edited notes as a MIDI file">⭳ Export MIDI</button>
     </div>
 
     <div class="zoom">
@@ -59,6 +64,7 @@
   <!-- Modules loaded in dependency order; no build step, no external deps -->
   <script src="js/pitch.js"></script>
   <script src="js/notes.js"></script>
+  <script src="js/midi.js"></script>
   <script src="js/renderer.js"></script>
   <script src="js/audio.js"></script>
   <script src="js/app.js"></script>

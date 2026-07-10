@@ -6,6 +6,12 @@ BlobTune loads an audio file (or a built-in demo tone), detects the notes in it 
 
 > This is a learning project that recreates a handful of Melodyne's *concepts*. It is not affiliated with Celemony, and it is nowhere near the real product in scope, quality, or polyphonic capability. See **Known limitations** below.
 
+## Live demo
+
+Hosted on GitHub Pages: **https://cd-ultra.github.io/melodyne-clone/**
+
+Every push to `main` redeploys automatically via `.github/workflows/pages.yml`. (First-time setup: in the repo, **Settings → Pages → Build and deployment → Source: GitHub Actions**. The workflow attempts to enable this on its first run, but if the deploy job is blocked you may need to flip that toggle once.)
+
 ## Running it
 
 Because browsers restrict `file://` pages, the most reliable way is a trivial static server from the project root:
@@ -30,7 +36,9 @@ On load the app **auto-generates a demo melody** and analyzes it, so you immedia
 - **Select a blob** — click it. Its detected note and any edit show in the status bar.
 - **Retune** — drag a selected blob up/down (snaps to semitones), or use **↑ / ↓** arrow keys. The detected-pitch micro-curve moves with it.
 - **Reset edits** — restore every blob to its detected pitch.
+- **Import MIDI** — load a Standard MIDI File (`.mid`). Its notes become blobs directly (no pitch detection needed), and a simple tone preview is synthesized so you can play, retune, and export. Supports format 0 and 1, tempo changes, and running status.
 - **Export WAV** — render the edited audio (with all your pitch changes baked in) and download it as a 16-bit PCM `.wav`. The file is named after the source (e.g. `demo-edited.wav`) and matches exactly what you hear on playback.
+- **Export MIDI** — write the current notes (at their **edited** pitches) to a `.mid` file (format 0, 120 BPM). Round-trips cleanly with Import MIDI.
 - **Zoom** — the **+ / −** buttons, `Ctrl/Cmd + scroll` (time zoom). Plain scroll pans time; `Shift + scroll` pans pitch.
 
 ## Architecture
@@ -42,6 +50,7 @@ The code is deliberately split by responsibility. Modules are plain IIFEs that h
 | `index.html` | Markup, toolbar/transport, module load order. |
 | `css/style.css` | Dark, DAW-like styling. |
 | `js/pitch.js` | **Pitch detection.** The YIN algorithm over short overlapping Hann-windowed frames, with an RMS silence gate, producing a per-frame pitch track (time, frequency, clarity). Also holds shared music helpers (freq↔MIDI, note names, black-key test). |
+| `js/midi.js` | **MIDI import/export.** A tiny Standard MIDI File reader/writer: `encodeMidiFromNotes` writes a format-0 SMF at the notes' edited pitches; `parseMidi` reads format 0/1 (tempo map, running status, note-on/off pairing) into a `{startTime, endTime, midi}` list. |
 | `js/notes.js` | **The blob/note model.** Segments the per-frame pitch track into `Note` objects by grouping consecutive voiced frames of similar pitch (bridging short unvoiced gaps, dropping too-short blips). Each `Note` keeps its detected pitch, a non-destructive `pitchOffset`, and a detected-pitch curve. |
 | `js/renderer.js` | **The piano-roll UI.** Owns the canvas and the view transform (zoom/scroll), draws the keyboard gutter, time ruler, grid, blobs, pitch curves and playhead, and handles pointer interaction (select + vertical drag to retune). Emits callbacks; knows nothing about audio. |
 | `js/audio.js` | **Playback + pitch editing + export.** Renders an edited copy of the signal where each retuned note is pitch-shifted (OLA time-stretch + linear resample to preserve duration), plays it via `AudioBufferSourceNode`, tracks the playhead, and encodes the edited buffer to a 16-bit PCM WAV blob for download. |
@@ -58,6 +67,8 @@ mono Float32Array ──► Pitch.detectPitchTrack (YIN)
                               ▼
                      Notes.segmentNotes ──► Note[] (blobs)
                               │
+   MIDI import ──► MIDI.parseMidi ──► Note[] ─┤  (skips detection; a tone
+                              │                   preview is synthesized)
               ┌───────────────┴───────────────┐
               ▼                                ▼
       Renderer (draw + drag)          AudioEngine (pitch-shift + play)
@@ -80,7 +91,8 @@ This is an educational clone; it intentionally stops well short of Melodyne:
 - **Pitch edits only.** You can retune blobs but not move them in time, split/merge them, or edit formants, amplitude, or timing — real Melodyne does all of this.
 - **Modest pitch-shift quality.** OLA + resample is simple and can smear transients or sound slightly "phasey," especially for large shifts. No formant preservation, so big shifts sound chipmunk-y/dark. A phase vocoder or PSOLA would sound better.
 - **Playback is mono** and re-renders the whole edited buffer on play; large files take a moment.
-- **Export is mono 16-bit WAV only** (matching the mono engine); there's no MP3/other-format or MIDI export, and no undo/redo.
+- **Audio export is mono 16-bit WAV only** (matching the mono engine); no MP3/other compressed formats, and no undo/redo.
+- **MIDI import synthesizes a plain tone preview**, not the original instrument, and flattens all channels/tracks into one blob list (it's monophonic-minded); overlapping/polyphonic MIDI will draw overlapping blobs and sum in the preview. MIDI export is a fixed 120 BPM, single track.
 - **Detection is best on clean, sustained, single-note material** (voice, flute, synth). Noisy or percussive audio yields messy blobs.
 
 ## Why "from scratch"

@@ -31,6 +31,8 @@
     demo: document.getElementById('btn-demo'),
     reset: document.getElementById('btn-reset'),
     export: document.getElementById('btn-export'),
+    exportMidi: document.getElementById('btn-export-midi'),
+    midiInput: document.getElementById('midi-input'),
     record: document.getElementById('btn-record'),
     file: document.getElementById('file-input'),
     zoomIn: document.getElementById('zoom-in'),
@@ -58,11 +60,16 @@
     els.demo.addEventListener('click', loadDemo);
     els.reset.addEventListener('click', resetEdits);
     els.export.addEventListener('click', exportWav);
+    els.exportMidi.addEventListener('click', exportMidi);
     els.record.addEventListener('click', toggleRecord);
     els.zoomIn.addEventListener('click', () => renderer.zoom(1.3, 'x'));
     els.zoomOut.addEventListener('click', () => renderer.zoom(1 / 1.3, 'x'));
     els.file.addEventListener('change', (e) => {
       if (e.target.files && e.target.files[0]) loadFile(e.target.files[0]);
+    });
+    els.midiInput.addEventListener('change', (e) => {
+      if (e.target.files && e.target.files[0]) importMidi(e.target.files[0]);
+      e.target.value = '';   // allow re-importing the same file
     });
 
     engine.onEnded = () => {
@@ -110,6 +117,67 @@
         hideLoading();
         setStatus('Could not decode ' + label + ': ' + err.message);
       });
+  }
+
+  // ---------- MIDI import ----------
+  function importMidi(file) {
+    stopPlayback();
+    sourceName = file.name.replace(/\.[^.]+$/, '') || 'midi';
+    showLoading('Reading MIDI…');
+    const reader = new FileReader();
+    reader.onload = () => setTimeout(() => {
+      try {
+        const parsed = MIDI.parseMidi(reader.result);
+        if (!parsed.length) {
+          hideLoading();
+          setStatus('No notes found in "' + file.name + '".');
+          return;
+        }
+        // Build blobs straight from the MIDI notes (no pitch detection needed).
+        notes = parsed.map((p) => new Notes.Note(
+          p.startTime, p.endTime, p.midi,
+          [{ t: p.startTime, midi: p.midi }, { t: p.endTime, midi: p.midi }]
+        ));
+        // Synthesize a matching tone preview so playback and WAV export work.
+        const sr = 44100;
+        engine.loadSamples(synthesizeFromNotes(notes, sr), sr);
+        engine.setNotes(notes);
+        engine.markDirty();
+        renderer.setNotes(notes, engine.duration);
+        renderer.setPlayhead(0);
+        hideLoading();
+        setStatus('Imported ' + notes.length + ' notes from "' + file.name +
+          '" (tone preview synthesized). Retune, play, or export WAV/MIDI.');
+        els.selection.textContent = '';
+      } catch (err) {
+        hideLoading();
+        setStatus('Could not read MIDI "' + file.name + '": ' + err.message);
+      }
+    }, 20);
+    reader.readAsArrayBuffer(file);
+  }
+
+  // Render a simple sine+harmonics tone per note so imported MIDI (which has
+  // no audio) is playable and exportable through the same engine.
+  function synthesizeFromNotes(noteList, sr) {
+    let end = 0;
+    for (const n of noteList) end = Math.max(end, n.endTime);
+    const out = new Float32Array(Math.max(1, Math.ceil((end + 0.3) * sr)));
+    for (const n of noteList) {
+      const freq = Pitch.midiToFreq(Math.round(n.detectedMidi));
+      const start = Math.floor(n.startTime * sr);
+      const len = Math.max(1, Math.floor((n.endTime - n.startTime) * sr));
+      for (let i = 0; i < len; i++) {
+        const idx = start + i;
+        if (idx >= out.length) break;
+        const p = i / len;
+        const env = Math.min(1, p / 0.02) * Math.min(1, (1 - p) / 0.05);
+        const ph = (2 * Math.PI * freq * i) / sr;
+        const s = Math.sin(ph) + 0.35 * Math.sin(2 * ph) + 0.15 * Math.sin(3 * ph);
+        out[idx] += 0.24 * env * s;
+      }
+    }
+    return out;
   }
 
   function loadDemo() {
@@ -370,6 +438,22 @@
         hideLoading();
       }
     }, 20);
+  }
+
+  function exportMidi() {
+    if (!notes.length) {
+      setStatus('No notes to export yet — load audio, record, or import MIDI first.');
+      return;
+    }
+    try {
+      const blob = MIDI.encodeMidiFromNotes(notes);
+      const edits = notes.filter((n) => n.pitchOffset).length;
+      triggerDownload(blob, sourceName + '-edited.mid');
+      setStatus('Exported ' + sourceName + '-edited.mid (' + notes.length + ' notes, ' +
+        edits + ' edited).');
+    } catch (err) {
+      setStatus('MIDI export failed: ' + err.message);
+    }
   }
 
   function triggerDownload(blob, filename) {

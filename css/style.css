@@ -102,6 +102,16 @@ html, body {
   border: 1px solid #ffab63;
 }
 .filebtn:hover { background: #ffa155; }
+/* Secondary file button (MIDI import): looks like a .tbtn, not the accent CTA. */
+.filebtn.ghost {
+  background: var(--panel-2);
+  color: var(--text);
+  font-weight: 400;
+  border: 1px solid var(--edge);
+  padding: 6px 10px;
+  font-size: 13px;
+}
+.filebtn.ghost:hover { background: #2c3542; border-color: #3d4859; }
 
 /* ---------- Workspace ---------- */
 .workspace {
