@@ -11,8 +11,10 @@
   --blob-sel: #ffd089;
   --grid-line: #262d37;
   --grid-line-strong: #313b48;
-  --white-key: #202631;
-  --black-key: #171b22;
+  --white-key: #e8eaef;
+  --white-key-sep: #b7bcc7;
+  --black-key: #12151b;
+  --key-label: #2b303b;
   --playhead: #4be0a0;
 }
 

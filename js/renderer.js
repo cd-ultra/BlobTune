@@ -16,6 +16,11 @@
   const SEMITONE_H = 15;   // base px per semitone (scaled by zoomY)
   const PX_PER_SEC = 120;  // base px per second (scaled by zoomX)
 
+  // Fixed addressable pitch range: C0 (MIDI 12) at the bottom to C6 (MIDI 84)
+  // at the top. The visible window scrolls (Shift+wheel) within these bounds.
+  const MIN_MIDI = 12;     // C0
+  const MAX_MIDI = 84;     // C6
+
   class Renderer {
     constructor(canvas, callbacks) {
       this.canvas = canvas;
@@ -29,9 +34,10 @@
       this.zoomX = 1;
       this.zoomY = 1;
       this.scrollX = 0;              // seconds at left edge of grid
-      this.scrollY = 0;              // top midi shown (float)
-      this.topMidi = 84;            // C6 near top by default
-      this.bottomMidi = 45;         // A2 near bottom
+      // topMidi is the (float) MIDI pitch shown at the very top of the grid;
+      // the visible window extends downward from it by gridH/semitoneH rows.
+      // It is always kept within [MIN_MIDI, MAX_MIDI] by _clampScroll().
+      this.topMidi = MAX_MIDI;
       this.playheadTime = 0;
 
       // Interaction state
@@ -55,20 +61,23 @@
       this.render();
     }
 
+    // Choose a default vertical scroll position centered on the detected notes
+    // (or on the C3–C4 area when there are none), clamped to the C0–C6 bounds.
     _fitPitchRange() {
-      if (!this.notes.length) { this.topMidi = 84; this.bottomMidi = 45; return; }
-      let lo = Infinity, hi = -Infinity;
-      for (const n of this.notes) {
-        lo = Math.min(lo, n.detectedMidi);
-        hi = Math.max(hi, n.detectedMidi);
+      const vis = this.visibleSemis;
+      let center;
+      if (this.notes.length) {
+        let lo = Infinity, hi = -Infinity;
+        for (const n of this.notes) {
+          lo = Math.min(lo, n.detectedMidi);
+          hi = Math.max(hi, n.detectedMidi);
+        }
+        center = (lo + hi) / 2;
+      } else {
+        center = 54; // midway between C3 (48) and C4 (60)
       }
-      this.topMidi = Math.ceil(hi) + 4;
-      this.bottomMidi = Math.floor(lo) - 4;
-      if (this.topMidi - this.bottomMidi < 18) {
-        const mid = (this.topMidi + this.bottomMidi) / 2;
-        this.topMidi = Math.round(mid + 9);
-        this.bottomMidi = Math.round(mid - 9);
-      }
+      this.topMidi = center + vis / 2;
+      this._clampScroll();
     }
 
     // ---- geometry ----
@@ -76,11 +85,33 @@
     get gridH() { return this.canvas.clientHeight - RULER_H; }
     get pxPerSec() { return PX_PER_SEC * this.zoomX; }
     get semitoneH() { return SEMITONE_H * this.zoomY; }
+    // Number of semitone rows that fit in the visible grid height.
+    get visibleSemis() { return this.gridH / this.semitoneH; }
 
     timeToX(t) { return KEYBOARD_W + (t - this.scrollX) * this.pxPerSec; }
     xToTime(x) { return this.scrollX + (x - KEYBOARD_W) / this.pxPerSec; }
     midiToY(midi) { return RULER_H + (this.topMidi - midi) * this.semitoneH; }
     yToMidi(y) { return this.topMidi - (y - RULER_H) / this.semitoneH; }
+
+    // Keep the visible window within [MIN_MIDI, MAX_MIDI]. If the window is
+    // taller than the whole range, center the range vertically.
+    _clampScroll() {
+      const range = MAX_MIDI - MIN_MIDI;
+      const vis = this.visibleSemis;
+      if (vis >= range) {
+        this.topMidi = MAX_MIDI + (vis - range) / 2;
+      } else {
+        this.topMidi = clamp(this.topMidi, MIN_MIDI + vis, MAX_MIDI);
+      }
+    }
+
+    // Inclusive integer MIDI range currently visible, clamped to the bounds.
+    get visibleMidiLo() {
+      return Math.max(MIN_MIDI, Math.floor(this.topMidi - this.visibleSemis));
+    }
+    get visibleMidiHi() {
+      return Math.min(MAX_MIDI, Math.ceil(this.topMidi));
+    }
 
     resize() {
       const rect = this.canvas.getBoundingClientRect();
@@ -88,12 +119,14 @@
       this.canvas.width = Math.round(rect.width * this.dpr);
       this.canvas.height = Math.round(rect.height * this.dpr);
       this.ctx.setTransform(this.dpr, 0, 0, this.dpr, 0, 0);
+      this._clampScroll();
       this.render();
     }
 
     zoom(factor, axis) {
       if (axis === 'y') this.zoomY = clamp(this.zoomY * factor, 0.5, 3);
       else this.zoomX = clamp(this.zoomX * factor, 0.25, 8);
+      this._clampScroll();
       this.render();
     }
 
@@ -122,8 +155,8 @@
     _drawRows() {
       const ctx = this.ctx;
       const W = this.canvas.clientWidth;
-      const topM = Math.ceil(this.topMidi);
-      const botM = Math.floor(this.bottomMidi);
+      const topM = this.visibleMidiHi;
+      const botM = this.visibleMidiLo;
       for (let m = botM; m <= topM; m++) {
         const y = this.midiToY(m);
         if (global.Pitch.isBlackKey(m)) {
@@ -228,29 +261,80 @@
       ctx.fill();
     }
 
+    // Draw the left gutter as a real black-and-white piano keyboard. Each
+    // semitone is one row (so blob rows line up exactly with their keys):
+    // white keys are full-width white rows with dark labels; black keys are
+    // shorter, darker keys overlaid on top with a subtle bevel.
     _drawKeyboard() {
       const ctx = this.ctx;
       const H = this.canvas.clientHeight;
-      ctx.fillStyle = css('--panel-2', '#232a34');
-      ctx.fillRect(0, RULER_H, KEYBOARD_W, H - RULER_H);
-      const topM = Math.ceil(this.topMidi);
-      const botM = Math.floor(this.bottomMidi);
+      const sh = this.semitoneH;
+      const topM = this.visibleMidiHi;
+      const botM = this.visibleMidiLo;
+
+      const whiteFill = css('--white-key', '#e8eaef');
+      const whiteEdge = css('--white-key-sep', '#b7bcc7');
+      const blackFill = css('--black-key', '#12151b');
+      const labelCol = css('--key-label', '#2b303b');
+
+      // Base: fill the whole gutter white (background behind all keys).
+      ctx.fillStyle = whiteFill;
+      ctx.fillRect(0, RULER_H, KEYBOARD_W - 1, H - RULER_H);
+
+      // Pass 1: white keys + separators between them.
       for (let m = botM; m <= topM; m++) {
-        const y = this.midiToY(m);
-        const black = global.Pitch.isBlackKey(m);
-        ctx.fillStyle = black ? css('--black-key', '#171b22') : css('--white-key', '#202631');
-        ctx.fillRect(0, y - this.semitoneH, KEYBOARD_W - 1, this.semitoneH - 1);
-        // Label C notes (and all notes when zoomed in enough).
-        const isC = ((m % 12) + 12) % 12 === 0;
-        if (isC || this.semitoneH > 16) {
-          ctx.fillStyle = black ? '#6c7787' : css('--muted', '#8593a5');
-          ctx.font = (isC ? 'bold ' : '') + '9px -apple-system, sans-serif';
-          ctx.textBaseline = 'middle';
-          ctx.textAlign = 'right';
-          ctx.fillText(global.Pitch.midiToName(m), KEYBOARD_W - 5, y - this.semitoneH / 2);
-        }
+        if (global.Pitch.isBlackKey(m)) continue;
+        const yBottom = this.midiToY(m);       // bottom edge of this row
+        const yTop = yBottom - sh;             // top edge of this row
+        // Slightly brighter top for a subtle gloss on each white key.
+        const grad = ctx.createLinearGradient(0, yTop, 0, yBottom);
+        grad.addColorStop(0, '#f4f5f8');
+        grad.addColorStop(0.5, whiteFill);
+        grad.addColorStop(1, '#dfe2e9');
+        ctx.fillStyle = grad;
+        ctx.fillRect(0, yTop, KEYBOARD_W - 1, sh);
+        // Separator line at the bottom of each white key.
+        ctx.strokeStyle = whiteEdge;
+        ctx.lineWidth = 1;
+        ctx.beginPath();
+        ctx.moveTo(0, yBottom + 0.5);
+        ctx.lineTo(KEYBOARD_W - 1, yBottom + 0.5);
+        ctx.stroke();
       }
+
+      // Pass 2: black keys, overlaid, ~62% of the gutter width and inset
+      // vertically so they read as raised keys sitting between the whites.
+      const blackW = Math.round((KEYBOARD_W - 1) * 0.62);
+      const inset = Math.min(2, sh * 0.14);
+      for (let m = botM; m <= topM; m++) {
+        if (!global.Pitch.isBlackKey(m)) continue;
+        const yBottom = this.midiToY(m);
+        const yTop = yBottom - sh + inset;
+        const kh = sh - inset * 2;
+        ctx.fillStyle = blackFill;
+        ctx.fillRect(0, yTop, blackW, kh);
+        // Thin highlight along the front (right) edge for a bevel.
+        ctx.fillStyle = 'rgba(255,255,255,0.10)';
+        ctx.fillRect(blackW - 2, yTop, 2, kh);
+      }
+
+      // Pass 3: labels. Always label C's; label every white key when there is
+      // vertical room. Drawn on white keys in dark ink.
+      ctx.textBaseline = 'middle';
+      ctx.textAlign = 'right';
+      for (let m = botM; m <= topM; m++) {
+        if (global.Pitch.isBlackKey(m)) continue;
+        const isC = ((m % 12) + 12) % 12 === 0;
+        if (!isC && sh < 16) continue;
+        const yMid = this.midiToY(m) - sh / 2;
+        ctx.fillStyle = labelCol;
+        ctx.font = (isC ? 'bold ' : '') + '9px -apple-system, sans-serif';
+        ctx.fillText(global.Pitch.midiToName(m), KEYBOARD_W - 5, yMid);
+      }
+
+      // Right border of the keyboard gutter.
       ctx.strokeStyle = css('--edge', '#2e3743');
+      ctx.lineWidth = 1;
       ctx.beginPath();
       ctx.moveTo(KEYBOARD_W - 0.5, RULER_H);
       ctx.lineTo(KEYBOARD_W - 0.5, H);
@@ -351,7 +435,11 @@
         const dy = y - this.drag.startY;
         const deltaSemi = -dy / this.semitoneH; // up = higher pitch
         const rawOffset = this.drag.startOffset + deltaSemi;
-        const snapped = Math.round(rawOffset);
+        const det = this.drag.note.detectedMidi;
+        // Clamp so the edited pitch stays within C0..C6.
+        const loOff = Math.ceil(MIN_MIDI - det);
+        const hiOff = Math.floor(MAX_MIDI - det);
+        const snapped = clamp(Math.round(rawOffset), loOff, hiOff);
         if (snapped !== this.drag.note.pitchOffset) {
           this.drag.note.pitchOffset = snapped;
           if (this.cb.onEdit) this.cb.onEdit(this.drag.note);
@@ -396,7 +484,7 @@
 
     scrollVertical(semitones) {
       this.topMidi -= semitones;
-      this.bottomMidi -= semitones;
+      this._clampScroll();
       this.render();
     }
   }

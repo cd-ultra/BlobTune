@@ -573,9 +573,14 @@
         const sel = notes.find((n) => n.selected);
         if (sel) {
           e.preventDefault();
-          sel.pitchOffset += e.code === 'ArrowUp' ? 1 : -1;
-          onEditNote(sel);
-          renderer.render();
+          const next = sel.pitchOffset + (e.code === 'ArrowUp' ? 1 : -1);
+          // Clamp edited pitch within C0 (12) .. C6 (84).
+          const eff = sel.detectedMidi + next;
+          if (eff >= 12 && eff <= 84) {
+            sel.pitchOffset = next;
+            onEditNote(sel);
+            renderer.render();
+          }
         }
       }
     });
