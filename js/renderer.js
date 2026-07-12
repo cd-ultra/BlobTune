@@ -30,6 +30,10 @@
       this.notes = [];
       this.duration = 0;
 
+      // Pitch-edit step in semitones (drag snap grid + arrow-key increment).
+      // 1 = semitone; fractional values (0.1, 0.05, 0.01) give cent precision.
+      this.step = 1;
+
       // View state
       this.zoomX = 1;
       this.zoomY = 1;
@@ -60,6 +64,19 @@
 
     setPlayhead(t) {
       this.playheadTime = t;
+      this.render();
+    }
+
+    // Set the pitch-edit snap step (semitones). Used by drag-to-retune so fine
+    // steps (e.g. 0.05 = 5 cents) allow sub-semitone tuning.
+    setStep(semitones) {
+      this.step = semitones > 0 ? semitones : 1;
+    }
+
+    // Keep the total edited timeline length in sync after a length edit so the
+    // ruler, seek clamp and horizontal extent follow the (possibly grown) buffer.
+    setDuration(d) {
+      this.duration = d || this.duration;
       this.render();
     }
 
@@ -468,7 +485,9 @@
         // Clamp so the edited pitch stays within C0..C6.
         const loOff = Math.ceil(MIN_MIDI - det);
         const hiOff = Math.floor(MAX_MIDI - det);
-        const snapped = clamp(Math.round(rawOffset), loOff, hiOff);
+        // Snap to the current step grid (whole tone → 1 cent) instead of always
+        // to whole semitones, then clamp within the addressable pitch range.
+        const snapped = clamp(snapToStep(rawOffset, this.step), loOff, hiOff);
         if (snapped !== this.drag.note.pitchOffset) {
           this.drag.note.pitchOffset = snapped;
           if (this.cb.onEdit) this.cb.onEdit(this.drag.note);
@@ -522,6 +541,12 @@
 
   // ---- helpers ----
   function clamp(v, lo, hi) { return Math.max(lo, Math.min(hi, v)); }
+  // Snap `v` to the nearest multiple of `step` (semitones), rounding away tiny
+  // floating-point residue so e.g. a 5-cent grid yields exact 0.05 multiples.
+  function snapToStep(v, step) {
+    if (!(step > 0)) step = 1;
+    return Math.round(Math.round(v / step) * step * 1e6) / 1e6;
+  }
   function roundRect(ctx, x, y, w, h, r) {
     r = Math.min(r, w / 2, h / 2);
     ctx.beginPath();

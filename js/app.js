@@ -43,6 +43,7 @@
     scaleRoot: document.getElementById('scale-root'),
     scaleType: document.getElementById('scale-type'),
     snap: document.getElementById('btn-snap'),
+    stepSize: document.getElementById('step-size'),
     saveProject: document.getElementById('btn-save-project'),
     projectInput: document.getElementById('project-input'),
     undo: document.getElementById('btn-undo'),
@@ -69,6 +70,7 @@
       onEditBegin: beginEdit,
       onSeek: (t) => { engine.seek(t); renderer.setPlayhead(t); },
     });
+    renderer.setStep(currentStep());
 
     els.play.addEventListener('click', togglePlay);
     els.stop.addEventListener('click', stopPlayback);
@@ -78,6 +80,11 @@
     els.exportMidi.addEventListener('click', exportMidi);
     els.record.addEventListener('click', toggleRecord);
     els.snap.addEventListener('click', snapToScale);
+    els.stepSize.addEventListener('change', () => {
+      renderer.setStep(currentStep());
+      setStatus('Pitch step set to ' + els.stepSize.options[els.stepSize.selectedIndex].text +
+        '. Arrow ↑/↓ or drag a blob to nudge the selected note by this amount.');
+    });
     els.undo.addEventListener('click', doUndo);
     els.redo.addEventListener('click', doRedo);
     els.zoomIn.addEventListener('click', () => renderer.zoom(1.3, 'x'));
@@ -107,6 +114,25 @@
 
     // Auto-load the demo so the app is immediately usable / verifiable.
     loadDemo();
+
+    // Test-only handle (enabled with ?test=1) so automated checks can drive the
+    // real app — select notes, read the edited buffer, etc. Not exposed normally.
+    if (/[?&]test=1/.test(location.search)) {
+      window.__bt = {
+        get notes() { return notes; },
+        get renderer() { return renderer; },
+        engine: engine,
+        currentStep: currentStep,
+        selectNote: (i) => {
+          for (const n of notes) n.selected = false;
+          if (notes[i]) { notes[i].selected = true; onSelectNote(notes[i]); }
+          renderer.render();
+          return notes[i] || null;
+        },
+        status: () => els.status.textContent,
+        selection: () => els.selection.textContent,
+      };
+    }
   }
 
   // ---------- loading ----------
@@ -492,21 +518,41 @@
   }
 
   // ---------- editing ----------
+  // Current pitch-edit step (semitones) from the toolbar selector.
+  function currentStep() {
+    const v = parseFloat(els.stepSize && els.stepSize.value);
+    return isFinite(v) && v > 0 ? v : 1;
+  }
+  // Round a pitch offset to 0.1-cent precision so repeated fractional nudges
+  // don't accumulate floating-point drift.
+  function roundOffset(v) { return Math.round(v * 1000) / 1000; }
+  // Signed cents string, e.g. "+15¢" / "-8¢" / "0¢".
+  function cents(semitones) {
+    const c = Math.round(semitones * 100);
+    return (c > 0 ? '+' : '') + c + '¢';
+  }
+  // Describe a note's edited pitch: nearest note name + deviation from it, plus
+  // the total offset applied. e.g. "C#4 +15¢ (detected C4, total +115¢)".
+  function describeNote(note) {
+    const editedMidi = note.midi;
+    const nearest = Math.round(editedMidi);
+    const devCents = cents(editedMidi - nearest);
+    let s = Pitch.midiToName(editedMidi) + ' ' + devCents;
+    s += ' (detected ' + Pitch.midiToName(note.detectedMidi);
+    if (note.pitchOffset) s += ', total ' + cents(note.pitchOffset);
+    s += ')';
+    return s;
+  }
+
   function onSelectNote(note) {
-    if (note) {
-      els.selection.textContent =
-        'Selected ' + note.name + '  (detected ' + Pitch.midiToName(note.detectedMidi) +
-        (note.pitchOffset ? ', ' + (note.pitchOffset > 0 ? '+' : '') + note.pitchOffset + ' st' : '') + ')';
-    } else {
-      els.selection.textContent = '';
-    }
+    els.selection.textContent = note ? 'Selected ' + describeNote(note) : '';
   }
   function onEditNote(note) {
     commitEdit();
     engine.markDirty();
     onSelectNote(note);
-    setStatus('Moved ' + Pitch.midiToName(note.detectedMidi) + ' → ' + note.name +
-      ' (' + (note.pitchOffset > 0 ? '+' : '') + note.pitchOffset + ' semitones). Press Space to hear it.');
+    setStatus('Tuned ' + Pitch.midiToName(note.detectedMidi) + ' → ' + Pitch.midiToName(note.midi) +
+      ' (total ' + cents(note.pitchOffset) + '). Press Space to hear it.');
   }
   // Audition a piano key clicked on the left keyboard gutter.
   function onKeyPlay(midi) {
@@ -556,7 +602,7 @@
       const cur = Math.round(n.detectedMidi + n.pitchOffset);
       let target = nearestInScale(cur, rootPc, intervals);
       target = Math.max(12, Math.min(84, target)); // keep within C0..C6
-      const newOffset = n.pitchOffset + (target - cur);
+      const newOffset = roundOffset(n.pitchOffset + (target - cur));
       if (newOffset !== n.pitchOffset) { n.pitchOffset = newOffset; changed++; }
     }
     if (changed) commitEdit(); else pendingSnapshot = null;
@@ -802,7 +848,8 @@
         const sel = notes.find((n) => n.selected);
         if (sel) {
           e.preventDefault();
-          const next = sel.pitchOffset + (e.code === 'ArrowUp' ? 1 : -1);
+          const step = currentStep();
+          const next = roundOffset(sel.pitchOffset + (e.code === 'ArrowUp' ? step : -step));
           // Clamp edited pitch within C0 (12) .. C6 (84).
           const eff = sel.detectedMidi + next;
           if (eff >= 12 && eff <= 84) {

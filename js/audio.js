@@ -216,17 +216,24 @@
    * analysis grain nearest the SAME time (identity time-map => duration kept).
    * The window half-width is max(P, synthesis spacing) so grains always keep
    * >=50% overlap (no amplitude dips), even for downward shifts.
+   *
+   * The synthesis spacing is accumulated as a FLOAT (P/ratio), not rounded to an
+   * integer number of samples. Integer rounding would collapse to zero shift for
+   * fine (few-cent) ratios — e.g. at 264 Hz a +5-cent ratio moves the period by
+   * only ~0.5 sample, which rounds away. Keeping the spacing fractional makes
+   * sub-semitone (cents) edits shift pitch by the correct amount on average.
    */
   function psolaShift(segment, sampleRate, freq, ratio) {
     const P = Math.round(sampleRate / freq);           // analysis period (samples)
-    const Ps = Math.max(1, Math.round(P / ratio));     // synthesis period
-    const halfW = Math.max(P, Ps);
+    const Psf = P / ratio;                             // synthesis period (float)
+    const halfW = Math.max(P, Math.ceil(Psf));
     const win = hann(2 * halfW);
     const n = segment.length;
     const out = new Float32Array(n);
     const norm = new Float32Array(n);
 
-    for (let s = 0; s < n; s += Ps) {
+    for (let sf = 0; sf < n; sf += Psf) {
+      const s = Math.round(sf);
       // Nearest analysis pitch-mark to this synthesis position (identity time).
       const a = Math.round(s / P) * P;
       for (let k = -halfW; k < halfW; k++) {

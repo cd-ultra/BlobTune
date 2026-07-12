@@ -33,9 +33,10 @@ On load the app **auto-generates a demo melody** and analyzes it, so you immedia
 - **Stop** — the ■ button or **Esc**.
 - **Seek** — click in the time ruler across the top.
 - **Record** — capture from your microphone. Click **Record** to start (the button pulses red and reads **Stop**), click again to finish; the recording is decoded and analyzed into blobs just like a loaded file. Great for singing/whistling/humming a line and correcting it. A **live input-level meter** appears next to the button while recording (green → yellow, turning red near clipping) so you can set your level.
-- **Select a blob** — click it. Its detected note and any edit show in the status bar.
-- **Retune** — drag a selected blob up/down (snaps to semitones), or use **↑ / ↓** arrow keys. The detected-pitch micro-curve moves with it.
-- **Reset edits** — restore every blob to its detected pitch.
+- **Select a blob** — click it. Its edited note name, the deviation in **cents**, and the total offset show in the status bar (e.g. `C#4 +15¢ (detected C4, total +115¢)`).
+- **Retune** — drag a selected blob up/down, or use **↑ / ↓** arrow keys. Both snap to the current **Step** (see below), so you can nudge a slightly-flat note into tune by single cents. The detected-pitch micro-curve moves with it.
+- **Step** — the toolbar **Step** selector chooses how far each retune moves: **Whole tone (2 st)**, **Semitone (1 st)**, **10 cents**, **5 cents**, or **1 cent** (1 cent = 0.01 semitone). Fine steps make the drag near-continuous. Default is Semitone.
+- **Reset edits** — restore every blob to its detected pitch (and original length).
 - **Import MIDI** — load a Standard MIDI File (`.mid`). Its notes become blobs directly (no pitch detection needed), and a simple tone preview is synthesized so you can play, retune, and export. Supports format 0 and 1, tempo changes, and running status.
 - **Export WAV** — render the edited audio (with all your pitch changes baked in) and download it as a 16-bit PCM `.wav`. The file is named after the source (e.g. `demo-edited.wav`) and matches exactly what you hear on playback.
 - **Export MIDI** — write the current notes (at their **edited** pitches) to a `.mid` file (format 0, 120 BPM). Round-trips cleanly with Import MIDI.
