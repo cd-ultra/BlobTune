@@ -82,9 +82,14 @@
     const frameSize = opts.frameSize || 2048;
     const hopSize = opts.hopSize || 512;
     const threshold = opts.threshold || 0.12;
-    const minFreq = opts.minFreq || 65;   // ~C2
-    const maxFreq = opts.maxFreq || 1200; // ~D6
+    // Default range tuned for the singing voice (~E2..B5). YIN on voice
+    // occasionally reports an octave error; keeping the ceiling below ~1kHz and
+    // the floor near typical vocal range reduces spurious out-of-range picks,
+    // and octaveCorrect() (below) repairs the transient ones that slip through.
+    const minFreq = opts.minFreq || 80;   // ~E2
+    const maxFreq = opts.maxFreq || 1000; // ~B5
     const clarityFloor = opts.clarityFloor != null ? opts.clarityFloor : 0.85;
+    const postProcess = opts.postProcess !== false; // octave-jump correction
 
     const times = [];
     const freqs = [];
@@ -125,11 +130,56 @@
       clarities.push(voiced ? clarity : 0);
     }
 
+    if (postProcess) octaveCorrect(freqs, opts.octaveRadius || 4);
+
     return {
       times, freqs, clarities,
       hopSeconds: hopSize / sampleRate,
       frameSeconds: frameSize / sampleRate,
     };
+  }
+
+  /**
+   * Repair transient octave/harmonic jumps in a per-frame frequency track.
+   *
+   * YIN on a real voice sometimes latches onto twice or half the true period for
+   * a few frames (breathy onsets, formant emphasis), which reads as a sudden
+   * ±12-semitone leap and then a jump back. For each voiced frame we take the
+   * MEDIAN pitch of its voiced neighbours (robust to those outliers) and, if
+   * shifting the frame by ±1 octave moves it strictly closer to that median,
+   * snap it there. A genuinely sustained octave change is NOT undone, because
+   * once enough frames sit at the new octave the local median follows them.
+   * On clean tones every frame already equals its neighbours' median, so this is
+   * a no-op and clean-tone behaviour is unchanged.
+   *
+   * Mutates `freqs` in place.
+   */
+  function octaveCorrect(freqs, radius) {
+    const n = freqs.length;
+    const midis = new Array(n);
+    for (let i = 0; i < n; i++) midis[i] = freqs[i] > 0 ? freqToMidi(freqs[i]) : null;
+    const corrected = midis.slice();
+    const win = [];
+    for (let i = 0; i < n; i++) {
+      if (midis[i] == null) continue;
+      win.length = 0;
+      for (let j = Math.max(0, i - radius); j <= Math.min(n - 1, i + radius); j++) {
+        if (midis[j] != null) win.push(midis[j]);
+      }
+      if (win.length < 3) continue; // not enough context to judge
+      win.sort((a, b) => a - b);
+      const med = win[Math.floor(win.length / 2)];
+      let bestShift = 0;
+      let bestDist = Math.abs(midis[i] - med);
+      for (const k of [-1, 1]) {
+        const d = Math.abs(midis[i] + 12 * k - med);
+        if (d < bestDist - 1e-6) { bestDist = d; bestShift = k; } // strict improvement only
+      }
+      if (bestShift !== 0) corrected[i] = midis[i] + 12 * bestShift;
+    }
+    for (let i = 0; i < n; i++) {
+      if (corrected[i] != null && corrected[i] !== midis[i]) freqs[i] = midiToFreq(corrected[i]);
+    }
   }
 
   function hannWindow(n) {
@@ -161,6 +211,7 @@
   global.Pitch = {
     detectPitchTrack,
     yinFrame,
+    octaveCorrect,
     freqToMidi,
     midiToFreq,
     midiToName,
