@@ -94,6 +94,7 @@
     const times = [];
     const freqs = [];
     const clarities = [];
+    const rms = [];          // per-frame RMS, normalized to the loudest frame
     const window = hannWindow(frameSize);
     const frame = new Float32Array(frameSize);
 
@@ -118,6 +119,7 @@
       // start — otherwise every note reads ~half a frame late and its blob is
       // shifted/short relative to where the pitch is actually sounding.
       const t = (start + frameSize / 2) / sampleRate;
+      rms.push(rmsVals[idx] / peakRms);
       if (rmsVals[idx] < silenceGate) {
         times.push(t); freqs.push(-1); clarities.push(0);
         continue;
@@ -130,10 +132,16 @@
       clarities.push(voiced ? clarity : 0);
     }
 
-    if (postProcess) octaveCorrect(freqs, opts.octaveRadius || 4);
+    if (postProcess) {
+      // Global octave alignment first (resolves multi-frame latches by
+      // penalizing octave leaps across the whole track), then a local median
+      // pass to mop up any single-frame residue.
+      octaveViterbi(freqs, clarities, opts.octavePenalty);
+      octaveCorrect(freqs, opts.octaveRadius || 4);
+    }
 
     return {
-      times, freqs, clarities,
+      times, freqs, clarities, rms,
       hopSeconds: hopSize / sampleRate,
       frameSeconds: frameSize / sampleRate,
     };
@@ -182,6 +190,80 @@
     }
   }
 
+  /**
+   * Globally re-align the octave of each voiced frame with a Viterbi/DP pass.
+   *
+   * YIN on real voice sometimes latches onto half or twice the true period for a
+   * RUN of frames (not just one), which the local-median octaveCorrect can miss
+   * when the wrong-octave run is long enough to dominate its own window. Here we
+   * consider, for every voiced frame, the candidate pitches {m-12, m, m+12} and
+   * find the path through the whole track that minimizes
+   *
+   *     sum over adjacent voiced frames  |cand_i - cand_{i-1}|          (leap cost)
+   *   + sum over frames                  penalty * |shift_i| / 12       (trust cost)
+   *
+   * The leap cost makes a transient jump to the wrong octave and back (two
+   * ~12-st steps) expensive, so short excursions snap back to the continuous
+   * line. The trust cost keeps us from re-octaving a genuinely sustained note:
+   * shifting every frame of a long note costs `penalty` per frame, which beats
+   * the one-time leap saving, so real octave leaps between notes are preserved.
+   * On a clean tone the raw path already has zero leaps and zero shift, so this
+   * is a no-op. Mutates `freqs` in place.
+   */
+  function octaveViterbi(freqs, clarities, penalty) {
+    penalty = penalty != null ? penalty : 1.5; // trust cost per full octave shift
+    const shifts = [-12, 0, 12];
+    const nShift = shifts.length;
+    // Indices of voiced frames, in order.
+    const idxs = [];
+    const midis = [];
+    for (let i = 0; i < freqs.length; i++) {
+      if (freqs[i] > 0) { idxs.push(i); midis.push(freqToMidi(freqs[i])); }
+    }
+    const N = idxs.length;
+    if (N < 3) return;
+
+    // cost[k] = best total cost of a path ending at frame p in state shifts[k].
+    let cost = new Float32Array(nShift);
+    const back = []; // back[p][k] = chosen previous state
+    for (let k = 0; k < nShift; k++) cost[k] = penalty * Math.abs(shifts[k]) / 12;
+    back.push(new Int8Array(nShift));
+
+    for (let p = 1; p < N; p++) {
+      const cand = midis[p];
+      const prevCand = midis[p - 1];
+      const next = new Float32Array(nShift);
+      const bp = new Int8Array(nShift);
+      for (let k = 0; k < nShift; k++) {
+        const cur = cand + shifts[k];
+        const emit = penalty * Math.abs(shifts[k]) / 12;
+        let best = Infinity, bestJ = 0;
+        for (let j = 0; j < nShift; j++) {
+          const trans = Math.abs(cur - (prevCand + shifts[j]));
+          const c = cost[j] + trans;
+          if (c < best) { best = c; bestJ = j; }
+        }
+        next[k] = best + emit;
+        bp[k] = bestJ;
+      }
+      cost = next;
+      back.push(bp);
+    }
+
+    // Backtrack from the cheapest final state.
+    let k = 0;
+    for (let j = 1; j < nShift; j++) if (cost[j] < cost[k]) k = j;
+    const path = new Int8Array(N);
+    for (let p = N - 1; p >= 0; p--) {
+      path[p] = k;
+      k = back[p][k];
+    }
+    for (let p = 0; p < N; p++) {
+      const s = shifts[path[p]];
+      if (s !== 0) freqs[idxs[p]] = midiToFreq(midis[p] + s);
+    }
+  }
+
   function hannWindow(n) {
     const w = new Float32Array(n);
     for (let i = 0; i < n; i++) w[i] = 0.5 - 0.5 * Math.cos((2 * Math.PI * i) / (n - 1));
@@ -212,6 +294,7 @@
     detectPitchTrack,
     yinFrame,
     octaveCorrect,
+    octaveViterbi,
     freqToMidi,
     midiToFreq,
     midiToName,

@@ -53,8 +53,14 @@
     // Trailing window (in frames) over which the note's centre pitch is taken as
     // a median — robust to vibrato and to a biased first frame.
     const centerWindow = opts.centerWindow || 16;
+    // Onset (re-articulation) splitting: a same-pitch note that is re-attacked
+    // without a silent gap shows a clear ENERGY dip-then-rise. We split there so
+    // two struck notes at one pitch become two blobs, while sustained/vibrato
+    // notes (whose amplitude only wobbles gently) do not.
+    const onsetSplit = opts.onsetSplit !== false;
 
-    const { times, freqs } = track;
+    const { times, freqs, rms } = track;
+    const onsets = onsetSplit && rms ? detectOnsets(rms, opts) : null;
     // How far to grow each blob past its outermost frame centre so it covers the
     // whole region the pitch is sounding (frames "hear" ~half a window each way).
     const pad = (track.frameSeconds || (track.hopSeconds || 0.011) * 4) / 2;
@@ -114,6 +120,12 @@
           flush();
           cur = { frames: pend.slice(), pending: [] };
         }
+      } else if (onsets && onsets[i] && cur.frames.length >= minNoteFrames) {
+        // Same pitch, but a clear re-articulation onset lands here: end the
+        // current blob and start a fresh one at the attack.
+        if (cur.pending.length) { cur.frames.push(...cur.pending); cur.pending = []; }
+        flush();
+        cur = { frames: [frame], pending: [] };
       } else {
         // Back within tolerance — reabsorb any pending wobble frames.
         if (cur.pending.length) { cur.frames.push(...cur.pending); cur.pending = []; }
@@ -172,9 +184,67 @@
   }
 
   /**
+   * Detect re-articulation onsets from a per-frame (normalized) RMS envelope.
+   *
+   * A struck/re-attacked note at the same pitch produces a local energy DIP
+   * (the singer briefly backs off / a soft consonant) followed by a clear RISE.
+   * We look for local minima whose trough sits well below the surrounding level
+   * (`dipRatio`) and that recover by at least `riseRatio`, and place the onset at
+   * the frame where the envelope climbs back through that recovery level.
+   *
+   * Gentle vibrato/tremolo amplitude wobble (typically <20%) fails BOTH the dip
+   * and the rise test, so a sustained note is not chopped up. A minimum gap
+   * between onsets further guards against periodic wobble firing repeatedly.
+   *
+   * @returns {boolean[]} onset[i] true where a new articulation begins.
+   */
+  function detectOnsets(rms, opts) {
+    opts = opts || {};
+    const dipRatio = opts.onsetDipRatio != null ? opts.onsetDipRatio : 0.6;   // trough <= dipRatio*peak
+    const riseRatio = opts.onsetRiseRatio != null ? opts.onsetRiseRatio : 1.5; // recover to riseRatio*trough
+    const win = opts.onsetWindow || 8;         // frames to look back/ahead for peak & recovery
+    const minGap = opts.onsetMinGapFrames || 6; // min frames between onsets
+    const minLevel = opts.onsetMinLevel != null ? opts.onsetMinLevel : 0.06; // ignore near-silence
+    const n = rms.length;
+    const onsets = new Array(n).fill(false);
+    if (n < 5) return onsets;
+
+    // Light 3-point smoothing so single-frame ripples don't read as troughs.
+    const env = new Array(n);
+    for (let i = 0; i < n; i++) {
+      let s = 0, c = 0;
+      for (let j = Math.max(0, i - 1); j <= Math.min(n - 1, i + 1); j++) { s += rms[j]; c++; }
+      env[i] = s / c;
+    }
+
+    let lastOnset = -minGap - 1;
+    for (let i = 2; i < n - 2; i++) {
+      // Local minimum (trough) of the smoothed envelope.
+      if (!(env[i] <= env[i - 1] && env[i] < env[i + 1])) continue;
+      const trough = env[i];
+      // Peak just before the dip.
+      let leftMax = 0;
+      for (let j = Math.max(0, i - win); j < i; j++) if (env[j] > leftMax) leftMax = env[j];
+      if (leftMax < minLevel) continue;
+      if (trough > dipRatio * leftMax) continue; // not a real dip
+      // Recovery: find where the envelope climbs back to riseRatio*trough.
+      const target = Math.max(riseRatio * trough, minLevel);
+      let onsetIdx = -1;
+      for (let j = i + 1; j <= Math.min(n - 1, i + win); j++) {
+        if (env[j] >= target && env[j] > trough) { onsetIdx = j; break; }
+      }
+      if (onsetIdx < 0) continue;
+      if (onsetIdx - lastOnset < minGap) continue;
+      onsets[onsetIdx] = true;
+      lastOnset = onsetIdx;
+    }
+    return onsets;
+  }
+
+  /**
    * Snap a raw midi value to the nearest semitone integer.
    */
   function snapMidi(midi) { return Math.round(midi); }
 
-  global.Notes = { Note, segmentNotes, snapMidi };
+  global.Notes = { Note, segmentNotes, snapMidi, detectOnsets };
 })(typeof window !== 'undefined' ? window : globalThis);
