@@ -158,8 +158,10 @@
           seg = pitchShift(seg, ratio, sr, freq);
         }
         // Time-stretch to the note's target duration (changes the timeline).
+        // `seg` is now at the EDITED pitch, so drive the pitch-synchronous
+        // stretch with the edited fundamental for clean, non-robotic sustain.
         const targetLen = this._noteTargetLen(srcLen, n.stretch);
-        if (targetLen !== seg.length) seg = stretchTo(seg, targetLen);
+        if (targetLen !== seg.length) seg = stretchTo(seg, targetLen, sr, global.Pitch.midiToFreq(n.midi));
         // Short fades at the seams so concatenation doesn't click.
         edgeFade(seg, Math.min(64, Math.floor(seg.length / 8)));
 
@@ -365,13 +367,49 @@
   }
 
   /**
-   * Time-stretch `input` to an exact target sample length, preserving pitch.
-   * Uses the OLA time-stretch for a musical stretch, then a tiny resample to
-   * pin the output to exactly `targetLen`. Very short inputs (too short for the
-   * OLA frame) fall back to a plain resample.
+   * Pitch-synchronous time-stretch (TD-PSOLA) to an exact target length,
+   * preserving pitch. Because we know the note's fundamental, we lay Hann grains
+   * two periods long at synthesis marks spaced ONE period apart (so the output
+   * keeps the same period → same pitch), and for each synthesis mark pull the
+   * analysis grain from the mapped input time (synthesisTime / factor) snapped to
+   * the nearest pitch mark. Repeating/omitting whole pitch periods this way keeps
+   * every grain phase-aligned, which avoids the "robotic"/phasey warble that
+   * fixed-hop OLA produces on voiced material.
    */
-  function stretchTo(input, targetLen) {
+  function psolaStretch(segment, sampleRate, freq, targetLen) {
+    const inLen = segment.length;
+    const P = Math.round(sampleRate / freq);
+    const factor = targetLen / inLen;
+    const win = hann(2 * P);
+    const out = new Float32Array(targetLen);
+    const norm = new Float32Array(targetLen);
+    for (let s = 0; s < targetLen; s += P) {
+      // Map this output position back to input time, snap to a whole period.
+      const a = Math.round((s / factor) / P) * P;
+      for (let k = -P; k < P; k++) {
+        const ai = a + k, si = s + k;
+        if (ai < 0 || ai >= inLen || si < 0 || si >= targetLen) continue;
+        const w = win[k + P];
+        out[si] += segment[ai] * w;
+        norm[si] += w;
+      }
+    }
+    for (let i = 0; i < targetLen; i++) out[i] = norm[i] > 1e-6 ? out[i] / norm[i] : 0;
+    return out;
+  }
+
+  /**
+   * Time-stretch `input` to an exact target sample length, preserving pitch.
+   * Uses pitch-synchronous PSOLA when a usable fundamental is known (clean on
+   * voiced/monophonic material); otherwise falls back to fixed-hop OLA + a tiny
+   * resample, and to a plain resample for very short inputs.
+   */
+  function stretchTo(input, targetLen, sampleRate, freq) {
     if (targetLen === input.length) return Float32Array.from(input);
+    const P = freq > 0 ? Math.round(sampleRate / freq) : 0;
+    if (P >= 4 && input.length >= 2 * P && targetLen >= 2 * P) {
+      return psolaStretch(input, sampleRate, freq, targetLen);
+    }
     if (targetLen < 2 || input.length < 1024) return resampleTo(input, targetLen);
     const factor = targetLen / input.length;
     const stretched = timeStretch(input, factor);
@@ -453,5 +491,5 @@
   }
 
   global.AudioEngine = AudioEngine;
-  global.DSP = { timeStretch, stretchTo, resampleTo, pitchShift, psolaShift, encodeWavPCM16 };
+  global.DSP = { timeStretch, stretchTo, psolaStretch, resampleTo, pitchShift, psolaShift, encodeWavPCM16 };
 })(typeof window !== 'undefined' ? window : globalThis);
