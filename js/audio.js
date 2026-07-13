@@ -89,32 +89,94 @@
       return this.editedBuffer.getChannelData(0);
     }
 
-    /** Build the edited buffer by pitch-shifting each edited note in place. */
-    _renderEdited() {
-      const out = this.dry.slice(0);
+    // Notes sorted by their source-audio start (the order they appear in dry).
+    _sortedNotes() {
+      return this.notes.slice().sort((a, b) => a.srcStart - b.srcStart);
+    }
+
+    // Target output length (samples) of a note given its source length.
+    _noteTargetLen(srcLen, stretch) {
+      return Math.max(1, Math.round(srcLen * (stretch > 0 ? stretch : 1)));
+    }
+
+    /**
+     * Recompute every note's edited startTime/endTime and the total edited
+     * duration by walking the notes in time order — for each note, advancing by
+     * its (stretched) target length, and keeping the inter-note gap audio
+     * unchanged. Cheap (no DSP): used during a length drag to reposition blobs
+     * and follow the growing/shrinking timeline. `_renderEdited()` performs the
+     * exact same walk in samples, so blob positions stay consistent with audio.
+     */
+    layout() {
       const sr = this.sampleRate;
-      for (const n of this.notes) {
-        if (!n.pitchOffset) continue;
-        const s0 = Math.max(0, Math.floor(n.startTime * sr));
-        const s1 = Math.min(this.dry.length, Math.ceil(n.endTime * sr));
-        if (s1 - s0 < 64) continue;
-        const seg = this.dry.subarray(s0, s1);
-        const ratio = Math.pow(2, n.pitchOffset / 12);
-        // Pitch-synchronous shift using the note's detected fundamental.
-        const freq = global.Pitch.midiToFreq(n.detectedMidi);
-        const shifted = pitchShift(seg, ratio, sr, freq);
-        // Equal-power-ish crossfade at the boundaries to hide seams.
-        const fade = Math.min(256, Math.floor((s1 - s0) / 8));
-        for (let i = 0; i < shifted.length; i++) {
-          let g = 1;
-          if (i < fade) g = i / fade;
-          else if (i > shifted.length - fade) g = Math.max(0, (shifted.length - i) / fade);
-          const idx = s0 + i;
-          out[idx] = shifted[i] * g + out[idx] * (1 - g);
-        }
+      const dryLen = this.dry ? this.dry.length : 0;
+      let cursor = 0;   // edited sample position
+      let dryPos = 0;   // dry sample position consumed so far
+      for (const n of this._sortedNotes()) {
+        const ns0 = clampInt(Math.floor(n.srcStart * sr), 0, dryLen);
+        const ns1 = clampInt(Math.floor(n.srcEnd * sr), 0, dryLen);
+        cursor += Math.max(0, ns0 - dryPos);          // inter-note gap (unchanged)
+        const srcLen = Math.max(0, ns1 - ns0);
+        const targetLen = this._noteTargetLen(srcLen, n.stretch);
+        n.startTime = cursor / sr;
+        n.endTime = (cursor + targetLen) / sr;
+        cursor += targetLen;
+        dryPos = ns1;
       }
+      cursor += Math.max(0, dryLen - dryPos);          // trailing audio
+      this.duration = cursor / sr;
+      return this.duration;
+    }
+
+    /**
+     * Build the edited buffer by walking the notes in time order: copy the dry
+     * gap audio before each note unchanged, then emit the note's audio pitch-
+     * shifted (length-preserving) and time-stretched to its target duration, then
+     * copy the trailing audio. This grows/shrinks the total timeline, so it also
+     * writes back each note's edited startTime/endTime and the new duration.
+     */
+    _renderEdited() {
+      const sr = this.sampleRate;
+      const dry = this.dry;
+      const dryLen = dry.length;
+      const parts = [];
+      let dryPos = 0;
+      let cursor = 0;
+      for (const n of this._sortedNotes()) {
+        const ns0 = clampInt(Math.floor(n.srcStart * sr), 0, dryLen);
+        const ns1 = clampInt(Math.floor(n.srcEnd * sr), 0, dryLen);
+        if (ns0 > dryPos) { parts.push(dry.subarray(dryPos, ns0)); cursor += ns0 - dryPos; }
+        dryPos = Math.max(dryPos, ns1);
+        const srcLen = Math.max(0, ns1 - ns0);
+        if (srcLen <= 0) { n.startTime = cursor / sr; n.endTime = cursor / sr; continue; }
+
+        let seg = dry.slice(ns0, ns1);
+        // Pitch shift (preserves length) using the note's detected fundamental.
+        if (n.pitchOffset && srcLen >= 64) {
+          const ratio = Math.pow(2, n.pitchOffset / 12);
+          const freq = global.Pitch.midiToFreq(n.detectedMidi);
+          seg = pitchShift(seg, ratio, sr, freq);
+        }
+        // Time-stretch to the note's target duration (changes the timeline).
+        const targetLen = this._noteTargetLen(srcLen, n.stretch);
+        if (targetLen !== seg.length) seg = stretchTo(seg, targetLen);
+        // Short fades at the seams so concatenation doesn't click.
+        edgeFade(seg, Math.min(64, Math.floor(seg.length / 8)));
+
+        n.startTime = cursor / sr;
+        n.endTime = (cursor + seg.length) / sr;
+        parts.push(seg);
+        cursor += seg.length;
+      }
+      if (dryLen > dryPos) { parts.push(dry.subarray(dryPos, dryLen)); cursor += dryLen - dryPos; }
+
+      const out = new Float32Array(cursor);
+      let o = 0;
+      for (const p of parts) { out.set(p, o); o += p.length; }
+
+      this.duration = out.length / sr;
       const ctx = this._ensureCtx();
-      const buf = ctx.createBuffer(1, out.length, sr);
+      const buf = ctx.createBuffer(1, out.length || 1, sr);
       buf.copyToChannel(out, 0);
       this.editedBuffer = buf;
       this.dirty = false;
@@ -288,6 +350,35 @@
     return out.subarray(0, Math.max(frame, Math.round(input.length * factor)));
   }
 
+  function clampInt(v, lo, hi) { return v < lo ? lo : v > hi ? hi : v; }
+
+  /** Apply a short linear fade-in and fade-out (in place) to soften seams. */
+  function edgeFade(buf, fade) {
+    if (!fade || fade < 1) return buf;
+    const n = buf.length;
+    for (let i = 0; i < fade && i < n; i++) {
+      const g = i / fade;
+      buf[i] *= g;
+      buf[n - 1 - i] *= g;
+    }
+    return buf;
+  }
+
+  /**
+   * Time-stretch `input` to an exact target sample length, preserving pitch.
+   * Uses the OLA time-stretch for a musical stretch, then a tiny resample to
+   * pin the output to exactly `targetLen`. Very short inputs (too short for the
+   * OLA frame) fall back to a plain resample.
+   */
+  function stretchTo(input, targetLen) {
+    if (targetLen === input.length) return Float32Array.from(input);
+    if (targetLen < 2 || input.length < 1024) return resampleTo(input, targetLen);
+    const factor = targetLen / input.length;
+    const stretched = timeStretch(input, factor);
+    if (stretched.length === targetLen) return Float32Array.from(stretched);
+    return resampleTo(stretched, targetLen);
+  }
+
   /** Linear-interpolation resample to an exact target length. */
   function resampleTo(input, targetLen) {
     const out = new Float32Array(targetLen);
@@ -362,5 +453,5 @@
   }
 
   global.AudioEngine = AudioEngine;
-  global.DSP = { timeStretch, resampleTo, pitchShift, psolaShift, encodeWavPCM16 };
+  global.DSP = { timeStretch, stretchTo, resampleTo, pitchShift, psolaShift, encodeWavPCM16 };
 })(typeof window !== 'undefined' ? window : globalThis);

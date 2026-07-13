@@ -15,6 +15,8 @@
   const RULER_H = 28;      // px, top time ruler
   const SEMITONE_H = 15;   // base px per semitone (scaled by zoomY)
   const PX_PER_SEC = 120;  // base px per second (scaled by zoomX)
+  const EDGE_GRAB = 6;     // px, grab zone near a blob's right edge for resizing
+  const MIN_BLOB_PX = 18;  // don't offer edge-resize on blobs narrower than this
 
   // Fixed addressable pitch range: C0 (MIDI 12) at the bottom to C6 (MIDI 84)
   // at the top. The visible window scrolls (Shift+wheel) within these bounds.
@@ -431,6 +433,17 @@
       return null;
     }
 
+    // If (x,y) is within the right-edge grab zone of the given note, return true.
+    _nearRightEdge(note, x, y) {
+      const nx = this.timeToX(note.startTime);
+      const nw = Math.max(3, note.duration * this.pxPerSec);
+      if (nw < MIN_BLOB_PX) return false;
+      const yCenter = this.midiToY(note.midi) - this.semitoneH / 2;
+      const h = this.semitoneH * 0.82;
+      if (y < yCenter - h / 2 - 3 || y > yCenter + h / 2 + 3) return false;
+      return x >= nx + nw - EDGE_GRAB && x <= nx + nw + EDGE_GRAB;
+    }
+
     _onDown(e) {
       const { x, y } = this._localXY(e);
       this.canvas.setPointerCapture(e.pointerId);
@@ -459,15 +472,28 @@
       for (const n of this.notes) n.selected = false;
       if (note) {
         note.selected = true;
-        // Let the host snapshot state for undo before a drag mutates pitch.
+        // Let the host snapshot state for undo before a drag mutates the note.
         if (this.cb.onEditBegin) this.cb.onEditBegin(note);
-        this.drag = {
-          note,
-          startY: y,
-          startOffset: note.pitchOffset,
-          moved: false,
-        };
-        this.canvas.style.cursor = 'ns-resize';
+        if (this._nearRightEdge(note, x, y)) {
+          // Grab the right edge → time-stretch (change the note's length).
+          this.drag = {
+            note,
+            mode: 'resize',
+            srcDur: note.srcDuration,
+            moved: false,
+          };
+          this.canvas.style.cursor = 'ew-resize';
+        } else {
+          // Body → vertical drag to retune.
+          this.drag = {
+            note,
+            mode: 'pitch',
+            startY: y,
+            startOffset: note.pitchOffset,
+            moved: false,
+          };
+          this.canvas.style.cursor = 'ns-resize';
+        }
         if (this.cb.onSelect) this.cb.onSelect(note);
       } else {
         if (this.cb.onSelect) this.cb.onSelect(null);
@@ -477,6 +503,23 @@
 
     _onMove(e) {
       const { x, y } = this._localXY(e);
+      if (this.drag && this.drag.mode === 'resize') {
+        const note = this.drag.note;
+        const srcDur = this.drag.srcDur || 0.001;
+        // New length = pointer time minus the note's (fixed) start.
+        let newDur = this.xToTime(x) - note.startTime;
+        const minDur = Math.max(0.02, srcDur * 0.25);
+        newDur = clamp(newDur, minDur, srcDur * 4);
+        const stretch = clamp(newDur / srcDur, 0.25, 4);
+        if (stretch !== note.stretch) {
+          note.stretch = stretch;
+          // Host relays out the timeline (this note's end + later notes shift).
+          if (this.cb.onResize) this.cb.onResize(note);
+        }
+        this.drag.moved = true;
+        this.render();
+        return;
+      }
       if (this.drag) {
         const dy = y - this.drag.startY;
         const deltaSemi = -dy / this.semitoneH; // up = higher pitch
@@ -500,7 +543,9 @@
       if (x < KEYBOARD_W && y > RULER_H) {
         this.canvas.style.cursor = 'pointer';   // clickable piano keys
       } else if (x > KEYBOARD_W && y > RULER_H) {
-        this.canvas.style.cursor = this._hitNote(x, y) ? 'ns-resize' : 'crosshair';
+        const hit = this._hitNote(x, y);
+        if (hit && this._nearRightEdge(hit, x, y)) this.canvas.style.cursor = 'ew-resize';
+        else this.canvas.style.cursor = hit ? 'ns-resize' : 'crosshair';
       } else {
         this.canvas.style.cursor = 'default';
       }

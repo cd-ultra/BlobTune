@@ -66,6 +66,7 @@
     renderer = new Renderer(els.canvas, {
       onSelect: onSelectNote,
       onEdit: onEditNote,
+      onResize: onResizeNote,
       onKeyPlay: onKeyPlay,
       onEditBegin: beginEdit,
       onSeek: (t) => { engine.seek(t); renderer.setPlayhead(t); },
@@ -193,7 +194,7 @@
         engine.loadSamples(synthesizeFromNotes(notes, sr), sr);
         engine.setNotes(notes);
         engine.markDirty();
-        renderer.setNotes(notes, engine.duration);
+        renderer.setNotes(notes, engine.layout());
         renderer.setPlayhead(0);
         hideLoading();
         setStatus('Imported ' + notes.length + ' notes from "' + file.name +
@@ -436,7 +437,7 @@
       clearHistory();
       engine.setNotes(notes);
       engine.markDirty();
-      renderer.setNotes(notes, engine.duration);
+      renderer.setNotes(notes, engine.layout());
       renderer.setPlayhead(0);
       hideLoading();
       if (!notes.length) {
@@ -541,6 +542,9 @@
     s += ' (detected ' + Pitch.midiToName(note.detectedMidi);
     if (note.pitchOffset) s += ', total ' + cents(note.pitchOffset);
     s += ')';
+    if (note.stretch && Math.abs(note.stretch - 1) > 1e-3) {
+      s += ' · ' + note.duration.toFixed(2) + 's (' + Math.round(note.stretch * 100) + '%)';
+    }
     return s;
   }
 
@@ -554,6 +558,19 @@
     setStatus('Tuned ' + Pitch.midiToName(note.detectedMidi) + ' → ' + Pitch.midiToName(note.midi) +
       ' (total ' + cents(note.pitchOffset) + '). Press Space to hear it.');
   }
+  // Live callback while dragging a blob's right edge to change its length.
+  function onResizeNote(note) {
+    commitEdit();
+    engine.markDirty();
+    // Cheap timeline walk: repositions this note's end + shifts later notes,
+    // and grows/shrinks the total duration — no DSP until playback/export.
+    renderer.setDuration(engine.layout());
+    updateTimeReadout();
+    onSelectNote(note);
+    setStatus('Length ' + note.srcDuration.toFixed(2) + 's → ' + note.duration.toFixed(2) + 's (' +
+      Math.round(note.stretch * 100) + '% — ' + (note.stretch >= 1 ? 'longer' : 'shorter') +
+      '). Press Space to hear it.');
+  }
   // Audition a piano key clicked on the left keyboard gutter.
   function onKeyPlay(midi) {
     engine.previewMidi(midi);
@@ -561,12 +578,15 @@
   }
 
   function resetEdits() {
-    if (notes.some((n) => n.pitchOffset)) { beginEdit(); commitEdit(); }
-    for (const n of notes) n.pitchOffset = 0;
+    const anyEdit = notes.some((n) => n.pitchOffset || (n.stretch && Math.abs(n.stretch - 1) > 1e-3));
+    if (anyEdit) { beginEdit(); commitEdit(); }
+    for (const n of notes) { n.pitchOffset = 0; n.stretch = 1; }
     engine.markDirty();
+    renderer.setDuration(engine.layout());
+    updateTimeReadout();
     renderer.render();
     onSelectNote(null);
-    setStatus('All pitch edits reset.');
+    setStatus('All edits reset (pitch and length).');
   }
 
   // ---------- snap-to-scale ----------
@@ -618,10 +638,13 @@
   // ---------- undo / redo ----------
   // Each history entry is a snapshot of every note's pitchOffset keyed by id,
   // so undo/redo restores pitch edits without touching the audio buffer.
-  function captureState() { return notes.map((n) => ({ id: n.id, off: n.pitchOffset })); }
+  function captureState() { return notes.map((n) => ({ id: n.id, off: n.pitchOffset, str: n.stretch })); }
   function restoreState(snap) {
-    const byId = new Map(snap.map((s) => [s.id, s.off]));
-    for (const n of notes) if (byId.has(n.id)) n.pitchOffset = byId.get(n.id);
+    const byId = new Map(snap.map((s) => [s.id, s]));
+    for (const n of notes) {
+      const s = byId.get(n.id);
+      if (s) { n.pitchOffset = s.off; n.stretch = s.str != null ? s.str : 1; }
+    }
   }
   // Called just before an edit gesture (drag start / arrow / reset) begins.
   function beginEdit() { if (!pendingSnapshot) pendingSnapshot = captureState(); }
@@ -651,11 +674,16 @@
   }
   function afterHistoryChange(label) {
     engine.markDirty();
+    // A length edit may have changed the timeline; re-layout so blob positions
+    // and the total duration follow (no-op for pitch-only history).
+    renderer.setDuration(engine.layout());
+    updateTimeReadout();
     renderer.render();
     const sel = notes.find((n) => n.selected);
     onSelectNote(sel || null);
     refreshHistoryButtons();
-    setStatus(label + ' — ' + notes.filter((n) => n.pitchOffset).length + ' note(s) currently edited.');
+    const edited = notes.filter((n) => n.pitchOffset || (n.stretch && Math.abs(n.stretch - 1) > 1e-3)).length;
+    setStatus(label + ' — ' + edited + ' note(s) currently edited.');
   }
   function refreshHistoryButtons() {
     if (els.undo) els.undo.disabled = !undoStack.length;
@@ -729,10 +757,15 @@
             duration: engine.duration,
             audioWavBase64: base64FromBytes(new Uint8Array(ab)),
             notes: notes.map((n) => ({
+              // Persist the SOURCE audio range + edits; the edited startTime/endTime
+              // are derived by layout() on load, so length edits round-trip.
+              srcStart: n.srcStart,
+              srcEnd: n.srcEnd,
               startTime: n.startTime,
               endTime: n.endTime,
               detectedMidi: n.detectedMidi,
               pitchOffset: n.pitchOffset,
+              stretch: n.stretch,
               curve: n.curve,
             })),
           };
@@ -763,13 +796,18 @@
           .then((audioBuffer) => {
             engine.loadAudioBuffer(audioBuffer);
             notes = (project.notes || []).map((p) => {
-              const n = new Notes.Note(p.startTime, p.endTime, p.detectedMidi, p.curve || []);
+              // Older projects (pre-length-edit) only stored startTime/endTime,
+              // which equal the source range when unstretched.
+              const s0 = p.srcStart != null ? p.srcStart : p.startTime;
+              const s1 = p.srcEnd != null ? p.srcEnd : p.endTime;
+              const n = new Notes.Note(s0, s1, p.detectedMidi, p.curve || []);
               n.pitchOffset = p.pitchOffset || 0;
+              n.stretch = p.stretch != null ? p.stretch : 1;
               return n;
             });
             engine.setNotes(notes);
             engine.markDirty();
-            renderer.setNotes(notes, engine.duration);
+            renderer.setNotes(notes, engine.layout());
             renderer.setPlayhead(0);
             clearHistory();   // a loaded project starts a fresh undo history
             hideLoading();
@@ -865,6 +903,11 @@
 
   // ---------- misc ----------
   function setStatus(msg) { els.status.textContent = msg; }
+  // Refresh the transport time readout's total (e.g. after a length edit grows
+  // or shrinks the timeline while stopped).
+  function updateTimeReadout() {
+    els.timeReadout.textContent = fmt(engine.getCurrentTime()) + ' / ' + fmt(engine.duration);
+  }
   function fmt(t) {
     if (!isFinite(t)) t = 0;
     const m = Math.floor(t / 60);
