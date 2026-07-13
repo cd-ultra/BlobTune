@@ -404,10 +404,54 @@
    * voiced/monophonic material); otherwise falls back to fixed-hop OLA + a tiny
    * resample, and to a plain resample for very short inputs.
    */
+  /**
+   * End (sample index) of a note's onset transient: the first short-time energy
+   * peak within the opening ~60 ms. Copying up to here verbatim keeps a hard
+   * attack sharp instead of smearing it across a long stretch.
+   */
+  function attackEnd(seg, sampleRate) {
+    const win = Math.max(4, Math.round(0.004 * sampleRate));   // 4 ms energy window
+    const maxSearch = Math.min(seg.length, Math.round(0.06 * sampleRate));
+    if (maxSearch < win + 2) return 0;
+    let e = 0;
+    for (let i = 0; i < win; i++) e += seg[i] * seg[i];
+    let peak = e, peakIdx = win;
+    for (let i = win; i < maxSearch; i++) {
+      e += seg[i] * seg[i] - seg[i - win] * seg[i - win];
+      if (e > peak) { peak = e; peakIdx = i; }
+    }
+    return peakIdx;
+  }
+
   function stretchTo(input, targetLen, sampleRate, freq) {
     if (targetLen === input.length) return Float32Array.from(input);
     const P = freq > 0 ? Math.round(sampleRate / freq) : 0;
     if (P >= 4 && input.length >= 2 * P && targetLen >= 2 * P) {
+      // Transient-aware: on a LENGTHENING stretch, copy the onset attack
+      // verbatim and stretch only the sustain after it, so a hard attack stays
+      // sharp. (Compression and attack-less notes just use plain PSOLA.)
+      if (targetLen > input.length) {
+        const aEnd = Math.min(attackEnd(input, sampleRate), Math.round(0.05 * sampleRate));
+        const sustainLen = input.length - aEnd;
+        const sustainTarget = targetLen - aEnd;
+        // Copy the (possibly short) attack verbatim as long as the sustain is
+        // long enough to PSOLA-stretch. A sharp attack is only a few ms, so we
+        // must NOT require it to be multiple periods long.
+        if (aEnd > 0 && sustainLen >= 2 * P && sustainTarget >= 2 * P) {
+          const st = psolaStretch(input.subarray(aEnd), sampleRate, freq, sustainTarget);
+          const out = new Float32Array(targetLen);
+          out.set(input.subarray(0, aEnd), 0);
+          out.set(st, aEnd);
+          // Short crossfade from the real post-attack signal into the stretched
+          // sustain so the attack→sustain seam has no phase click.
+          const cf = Math.min(P, sustainLen - 1, 128);
+          for (let i = 0; i < cf; i++) {
+            const g = i / cf;
+            out[aEnd + i] = input[aEnd + i] * (1 - g) + st[i] * g;
+          }
+          return out;
+        }
+      }
       return psolaStretch(input, sampleRate, freq, targetLen);
     }
     if (targetLen < 2 || input.length < 1024) return resampleTo(input, targetLen);
