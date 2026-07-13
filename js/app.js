@@ -433,7 +433,10 @@
     setTimeout(() => {
       const mono = engine.getMono();
       const track = Pitch.detectPitchTrack(mono, engine.sampleRate);
-      notes = Notes.segmentNotes(track);
+      // Spectral-flux onsets (frame-aligned with the pitch track) so a
+      // re-articulated same-pitch note splits even without a silent gap.
+      const onset = Onset.detect(mono, engine.sampleRate);
+      notes = Notes.segmentNotes(track, { onsetFrames: onset.onsets });
       clearHistory();
       engine.setNotes(notes);
       engine.markDirty();
