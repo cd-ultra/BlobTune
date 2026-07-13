@@ -17,15 +17,24 @@
   class Note {
     constructor(startTime, endTime, detectedMidi, curve) {
       this.id = _id++;
-      this.startTime = startTime;       // seconds
-      this.endTime = endTime;           // seconds
+      this.startTime = startTime;       // seconds — position on the EDITED timeline
+      this.endTime = endTime;           // seconds — end on the EDITED timeline
+      // The note's SOURCE audio range in the dry signal. Fixed at creation and
+      // used to slice the audio to (re)process; kept separate from the editable
+      // start/endTime so pitch + length edits compose and remain resettable.
+      this.srcStart = startTime;
+      this.srcEnd = endTime;
       this.detectedMidi = detectedMidi; // float midi (median of frames)
-      this.pitchOffset = 0;             // user edit, in semitones (snapped)
+      this.pitchOffset = 0;             // user edit, in semitones (fractional)
+      // Length edit: target duration = srcDuration * stretch. 1 = unchanged.
+      this.stretch = 1;
       this.selected = false;
       // curve: array of {t, midi} sampled points across the note (detected)
       this.curve = curve || [];
     }
     get duration() { return this.endTime - this.startTime; }
+    // Original (source) duration of the note's audio, before any length edit.
+    get srcDuration() { return this.srcEnd - this.srcStart; }
     // Effective (edited) pitch in midi.
     get midi() { return this.detectedMidi + this.pitchOffset; }
     get name() { return global.Pitch.midiToName(this.midi); }

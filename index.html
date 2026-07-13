@@ -49,6 +49,16 @@
         </select>
         <button id="btn-snap" class="tbtn" title="Snap all notes to the selected scale">Snap to scale</button>
       </span>
+      <span class="scale-group" title="Pitch nudge step (Arrow keys / drag snap)">
+        <span class="zlabel">Step</span>
+        <select id="step-size" class="tsel" aria-label="Pitch edit step">
+          <option value="2">Whole tone (2 st)</option>
+          <option value="1" selected>Semitone (1 st)</option>
+          <option value="0.1">10 cents</option>
+          <option value="0.05">5 cents</option>
+          <option value="0.01">1 cent</option>
+        </select>
+      </span>
       <button id="btn-reset" class="tbtn" title="Reset all pitch edits">Reset edits</button>
       <label class="filebtn ghost" title="Import a MIDI file as blobs">
         Import MIDI
