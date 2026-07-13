@@ -321,6 +321,121 @@
     return w;
   }
 
+  // ---- DSP: LPC source-filter formant preservation ----
+  //
+  // A raw PSOLA pitch-shift moves the WHOLE spectrum, formants included, so a big
+  // upward shift sounds "chipmunk" and a downward one sounds dark/muffled. To keep
+  // the formant (vocal-tract resonance) envelope fixed while only the pitch moves,
+  // we model each segment as an all-pole source-filter system:
+  //
+  //   1. Estimate the spectral envelope with LPC (windowed autocorrelation ->
+  //      Levinson–Durbin, order ~18 at 44.1k).
+  //   2. Inverse-filter the segment by A(z) to get the whitened excitation/residual
+  //      (roughly the glottal pulse train — flat spectral envelope).
+  //   3. Pitch-shift the EXCITATION with the existing PSOLA (moves f0).
+  //   4. Re-synthesize through the ORIGINAL all-pole filter 1/A(z), which re-imposes
+  //      the FIXED formant envelope on the moved excitation.
+  //
+  // Because A(z) is unchanged, formant peaks stay put while f0 moves. On a clean
+  // tone the inverse+forward filter pair is a near-identity, so it barely perturbs
+  // the demo. Guards: reject unstable/degenerate filters and runaway synthesis and
+  // fall back to plain PSOLA. Default ON; toggle via DSP.setFormantPreserve().
+  let FORMANT_PRESERVE = true;
+
+  /**
+   * LPC analysis of a segment via windowed autocorrelation + Levinson–Durbin.
+   * Returns predictor coefficients a[1..order] (so residual e[n] = x[n] -
+   * Σ a[j]·x[n-j]) or null when the filter is degenerate / near-unstable.
+   */
+  function lpcCoeffs(seg, order) {
+    const n = seg.length;
+    if (n < order + 2) return null;
+    // Hann-window the segment for a well-behaved autocorrelation estimate.
+    const x = new Float64Array(n);
+    for (let i = 0; i < n; i++) x[i] = seg[i] * (0.5 - 0.5 * Math.cos((2 * Math.PI * i) / (n - 1)));
+    const R = new Float64Array(order + 1);
+    for (let lag = 0; lag <= order; lag++) {
+      let s = 0;
+      for (let i = 0; i + lag < n; i++) s += x[i] * x[i + lag];
+      R[lag] = s;
+    }
+    if (!(R[0] > 0)) return null;          // silent / degenerate frame
+    R[0] *= 1.0001;                        // white-noise floor -> stability margin
+    const a = new Float64Array(order + 1); // a[0] implicitly 1; predictor in a[1..]
+    const tmp = new Float64Array(order + 1);
+    let E = R[0];
+    let maxRefl = 0;
+    for (let i = 1; i <= order; i++) {
+      let acc = R[i];
+      for (let j = 1; j < i; j++) acc -= a[j] * R[i - j];
+      const k = acc / E;                   // reflection coefficient
+      if (!isFinite(k)) return null;
+      if (Math.abs(k) > maxRefl) maxRefl = Math.abs(k);
+      for (let j = 1; j < i; j++) tmp[j] = a[j] - k * a[i - j];
+      for (let j = 1; j < i; j++) a[j] = tmp[j];
+      a[i] = k;
+      E *= 1 - k * k;
+      if (!(E > 0)) return null;           // lost positive-definiteness
+    }
+    if (maxRefl >= 0.999) return null;      // too close to the unit circle
+    return a;
+  }
+
+  /** Whitening / inverse filter: e[n] = x[n] - Σ a[j]·x[n-j]. */
+  function lpcResidual(seg, a, order) {
+    const n = seg.length;
+    const e = new Float32Array(n);
+    for (let i = 0; i < n; i++) {
+      let pred = 0;
+      const jm = i < order ? i : order;
+      for (let j = 1; j <= jm; j++) pred += a[j] * seg[i - j];
+      e[i] = seg[i] - pred;
+    }
+    return e;
+  }
+
+  /** All-pole synthesis 1/A(z): x[n] = e[n] + Σ a[j]·x[n-j]; null on runaway. */
+  function lpcSynth(e, a, order) {
+    const n = e.length;
+    const x = new Float32Array(n);
+    for (let i = 0; i < n; i++) {
+      let pred = 0;
+      const jm = i < order ? i : order;
+      for (let j = 1; j <= jm; j++) pred += a[j] * x[i - j];
+      const v = e[i] + pred;
+      if (!isFinite(v) || v > 8 || v < -8) return null; // guard against blow-up
+      x[i] = v;
+    }
+    return x;
+  }
+
+  /**
+   * Formant-preserving PSOLA pitch-shift. Inverse-filter -> shift excitation ->
+   * re-synthesize through the fixed LPC envelope. Returns null (so callers fall
+   * back to plain PSOLA) when the LPC model is degenerate or synthesis runs away.
+   */
+  function psolaShiftFormant(segment, sampleRate, freq, ratio) {
+    // ~18 taps at 44.1k; enough poles for ~8–9 formant-ish resonances.
+    const order = Math.max(8, Math.min(24, Math.round(sampleRate / 2500)));
+    const a = lpcCoeffs(segment, order);
+    if (!a) return null;
+    const e = lpcResidual(segment, a, order);
+    const eShift = psolaShift(e, sampleRate, freq, ratio);
+    const out = lpcSynth(eShift, a, order);
+    if (!out) return null;
+    // Match the input RMS so the source-filter round-trip doesn't change loudness
+    // at the note seams (bounded to avoid amplifying near-silent frames).
+    let ei = 0, eo = 0;
+    for (let i = 0; i < segment.length; i++) ei += segment[i] * segment[i];
+    for (let i = 0; i < out.length; i++) eo += out[i] * out[i];
+    if (ei > 0 && eo > 0) {
+      let g = Math.sqrt(ei / eo);
+      if (g > 4) g = 4; else if (g < 0.25) g = 0.25;
+      for (let i = 0; i < out.length; i++) out[i] *= g;
+    }
+    return out;
+  }
+
   /**
    * Time-stretch a signal by `factor` (output length ≈ input.length * factor)
    * using fixed-hop overlap-add with a Hann window. Pitch is preserved.
@@ -436,11 +551,19 @@
    * Uses TD-PSOLA when a usable fundamental is known (clean, monophonic);
    * otherwise falls back to OLA time-stretch + resample.
    */
-  function pitchShift(segment, ratio, sampleRate, freq) {
+  function pitchShift(segment, ratio, sampleRate, freq, opts) {
     if (Math.abs(ratio - 1) < 1e-4) return Float32Array.from(segment);
     const P = freq > 0 ? Math.round(sampleRate / freq) : 0;
     // PSOLA needs at least a couple of periods of context inside the segment.
     if (P >= 4 && segment.length >= 4 * P) {
+      // Formant-preserving path (source-filter LPC) keeps the vocal-tract
+      // envelope fixed so big retunes don't sound chipmunk/dark. Falls back to
+      // plain PSOLA if the LPC model is unusable for this segment.
+      const wantFormant = FORMANT_PRESERVE && (!opts || opts.formant !== false);
+      if (wantFormant) {
+        const fp = psolaShiftFormant(segment, sampleRate, freq, ratio);
+        if (fp) return fp;
+      }
       return psolaShift(segment, sampleRate, freq, ratio);
     }
     const stretched = timeStretch(segment, ratio);
@@ -491,5 +614,10 @@
   }
 
   global.AudioEngine = AudioEngine;
-  global.DSP = { timeStretch, stretchTo, psolaStretch, resampleTo, pitchShift, psolaShift, encodeWavPCM16 };
+  global.DSP = {
+    timeStretch, stretchTo, psolaStretch, resampleTo, pitchShift, psolaShift,
+    psolaShiftFormant, lpcCoeffs, lpcResidual, lpcSynth, encodeWavPCM16,
+    get formantPreserve() { return FORMANT_PRESERVE; },
+    setFormantPreserve(v) { FORMANT_PRESERVE = !!v; },
+  };
 })(typeof window !== 'undefined' ? window : globalThis);
