@@ -63,13 +63,25 @@
     // a median — robust to vibrato and to a biased first frame.
     const centerWindow = opts.centerWindow || 16;
     // Onset (re-articulation) splitting: a same-pitch note that is re-attacked
-    // without a silent gap shows a clear ENERGY dip-then-rise. We split there so
-    // two struck notes at one pitch become two blobs, while sustained/vibrato
-    // notes (whose amplitude only wobbles gently) do not.
+    // without a silent gap should still become two blobs. We prefer a
+    // spectral-flux onset list (opts.onsetFrames, from onset.js — catches
+    // legato re-attacks with no amplitude dip), and fall back to the older
+    // energy dip-then-rise cue when it isn't supplied.
     const onsetSplit = opts.onsetSplit !== false;
+    // An onset only splits a same-pitch note that's already run this many frames,
+    // so the note's own attack onset (a few frames in) never splits it.
+    const onsetMinFrames = opts.onsetMinFrames || 7;
 
     const { times, freqs, rms } = track;
-    const onsets = onsetSplit && rms ? detectOnsets(rms, opts) : null;
+    let onsets = null;
+    if (onsetSplit) {
+      if (opts.onsetFrames) {
+        onsets = new Array(freqs.length).fill(false);
+        for (const fi of opts.onsetFrames) if (fi >= 0 && fi < onsets.length) onsets[fi] = true;
+      } else if (rms) {
+        onsets = detectOnsets(rms, opts);
+      }
+    }
     // How far to grow each blob past its outermost frame centre so it covers the
     // whole region the pitch is sounding (frames "hear" ~half a window each way).
     const pad = (track.frameSeconds || (track.hopSeconds || 0.011) * 4) / 2;
@@ -129,9 +141,11 @@
           flush();
           cur = { frames: pend.slice(), pending: [] };
         }
-      } else if (onsets && onsets[i] && cur.frames.length >= minNoteFrames) {
+      } else if (onsets && onsets[i] && cur.frames.length >= onsetMinFrames) {
         // Same pitch, but a clear re-articulation onset lands here: end the
-        // current blob and start a fresh one at the attack.
+        // current blob and start a fresh one at the attack. Require the note to
+        // have run a while first (onsetMinFrames) so a note's OWN attack onset,
+        // a few frames into it, doesn't split it in two.
         if (cur.pending.length) { cur.frames.push(...cur.pending); cur.pending = []; }
         flush();
         cur = { frames: [frame], pending: [] };
