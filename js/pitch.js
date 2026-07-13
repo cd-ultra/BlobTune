@@ -89,6 +89,10 @@
     const minFreq = opts.minFreq || 80;   // ~E2
     const maxFreq = opts.maxFreq || 1000; // ~B5
     const clarityFloor = opts.clarityFloor != null ? opts.clarityFloor : 0.85;
+    // Hysteresis: a frame only ENTERS the voiced state above clarityFloor, but
+    // STAYS voiced down to the lower clarityStay while sound continues — so a
+    // breathy sustain dip or a decaying note tail isn't clipped into fragments.
+    const clarityStay = opts.clarityStay != null ? opts.clarityStay : 0.70;
     const postProcess = opts.postProcess !== false; // octave-jump correction
 
     const times = [];
@@ -114,6 +118,7 @@
     const silenceGate = peakRms * 0.04;
 
     let idx = 0;
+    let voicedState = false;   // for the enter/stay clarity hysteresis
     for (let start = 0; start + frameSize <= samples.length; start += hopSize, idx++) {
       // Time-stamp each estimate at the CENTRE of its analysis window, not the
       // start — otherwise every note reads ~half a frame late and its blob is
@@ -122,11 +127,16 @@
       rms.push(rmsVals[idx] / peakRms);
       if (rmsVals[idx] < silenceGate) {
         times.push(t); freqs.push(-1); clarities.push(0);
+        voicedState = false;   // silence always breaks voicing
         continue;
       }
       for (let i = 0; i < frameSize; i++) frame[i] = samples[start + i] * window[i];
       const { freq, clarity } = yinFrame(frame, sampleRate, threshold);
-      const voiced = freq >= minFreq && freq <= maxFreq && clarity >= clarityFloor;
+      const inRange = freq >= minFreq && freq <= maxFreq;
+      // Enter voiced only above clarityFloor; once voiced, stay down to
+      // clarityStay so onsets/tails and breathy dips aren't clipped.
+      const voiced = inRange && clarity >= (voicedState ? clarityStay : clarityFloor);
+      voicedState = voiced;
       times.push(t);
       freqs.push(voiced ? freq : -1);
       clarities.push(voiced ? clarity : 0);
