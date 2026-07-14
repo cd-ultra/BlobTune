@@ -32,6 +32,13 @@
       this.notes = [];
       this.duration = 0;
 
+      // Optional spectrogram underlay (see setSpectrogram). `_specBitmap` is an
+      // offscreen canvas in time × pitch space, rebuilt only when the data
+      // changes and then blitted (scaled) each frame — cheap to scroll/zoom.
+      this.spectrogram = null;
+      this.showSpectrogram = false;
+      this._specBitmap = null;
+
       // Pitch-edit step in semitones (drag snap grid + arrow-key increment).
       // 1 = semitone; fractional values (0.1, 0.05, 0.01) give cent precision.
       this.step = 1;
@@ -79,6 +86,20 @@
     // ruler, seek clamp and horizontal extent follow the (possibly grown) buffer.
     setDuration(d) {
       this.duration = d || this.duration;
+      this.render();
+    }
+
+    // Attach (or clear) the spectrogram data from spectrogram.js. The offscreen
+    // bitmap is rebuilt lazily on the next render.
+    setSpectrogram(spec) {
+      this.spectrogram = spec || null;
+      this._specBitmap = null;
+      this.render();
+    }
+
+    // Show/hide the spectrogram underlay.
+    setShowSpectrogram(on) {
+      this.showSpectrogram = !!on;
       this.render();
     }
 
@@ -161,6 +182,7 @@
       ctx.fillRect(0, 0, W, H);
 
       this._drawRows();
+      if (this.showSpectrogram && this.spectrogram) this._drawSpectrogram();
       this._drawBeatGrid();
       this._drawNotes();
       this._drawPlayhead();
@@ -192,6 +214,76 @@
         ctx.lineTo(W, y + 0.5);
         ctx.stroke();
       }
+    }
+
+    // Build an offscreen bitmap of the spectrogram in time × pitch space:
+    // columns are STFT frames (time), rows are pitch sampled across the full
+    // C0..C6 range. Because both axes are then linear in their own space, the
+    // bitmap can be blitted with a single scaled drawImage that follows zoom and
+    // scroll. Built once per spectrogram (or DPR change), not per frame.
+    _buildSpecBitmap() {
+      const spec = this.spectrogram;
+      const rowsPerSemi = 4;
+      const midiSpan = MAX_MIDI - MIN_MIDI;
+      const W = Math.max(1, spec.frameCount);
+      const H = Math.max(1, midiSpan * rowsPerSemi);
+      const off = document.createElement('canvas');
+      off.width = W;
+      off.height = H;
+      const octx = off.getContext('2d');
+      const img = octx.createImageData(W, H);
+      const data = img.data;
+      const range = Math.max(1, spec.maxDb - spec.floorDb);
+
+      // Precompute, for each output row, which FFT bin it samples (row 0 = top =
+      // MAX_MIDI). Rows whose frequency falls outside the analysed bins stay
+      // transparent.
+      const rowBin = new Int32Array(H);
+      for (let r = 0; r < H; r++) {
+        const midi = MAX_MIDI - r / rowsPerSemi;
+        const hz = global.Pitch.midiToFreq(midi);
+        const bin = Math.round(hz / spec.binHz);
+        rowBin[r] = (bin >= 1 && bin < spec.nBins) ? bin : -1;
+      }
+
+      for (let r = 0; r < H; r++) {
+        const bin = rowBin[r];
+        let di = r * W * 4;
+        if (bin < 0) { for (let c = 0; c < W; c++, di += 4) data[di + 3] = 0; continue; }
+        for (let c = 0; c < W; c++, di += 4) {
+          const db = spec.mags[c * spec.nBins + bin];
+          let t = (db - spec.floorDb) / range;         // 0 (quiet) .. 1 (loud)
+          if (t <= 0) { data[di + 3] = 0; continue; }
+          if (t > 1) t = 1;
+          const col = magma(t);
+          data[di] = col[0]; data[di + 1] = col[1]; data[di + 2] = col[2];
+          // Fade quiet cells in so the grid/blobs still read through them.
+          data[di + 3] = Math.round(255 * Math.min(1, t * 1.35));
+        }
+      }
+      octx.putImageData(img, 0, 0);
+      this._specBitmap = off;
+    }
+
+    _drawSpectrogram() {
+      const spec = this.spectrogram;
+      if (!spec.frameCount) return;
+      if (!this._specBitmap) this._buildSpecBitmap();
+      const ctx = this.ctx;
+      // Dest rectangle: the bitmap spans time [0, frameCount*hop] and pitch
+      // [MIN_MIDI, MAX_MIDI]; map those extents through the view transform and
+      // let drawImage scale. Clip to the grid so it can't spill into the gutter.
+      const dx = this.timeToX(0);
+      const dw = spec.frameCount * spec.hopSeconds * this.pxPerSec;
+      const dyTop = this.midiToY(MAX_MIDI);
+      const dyBot = this.midiToY(MIN_MIDI);
+      ctx.save();
+      ctx.beginPath();
+      ctx.rect(KEYBOARD_W, RULER_H, this.gridW, this.gridH);
+      ctx.clip();
+      ctx.imageSmoothingEnabled = true;
+      ctx.drawImage(this._specBitmap, dx, dyTop, dw, dyBot - dyTop);
+      ctx.restore();
     }
 
     _drawBeatGrid() {
@@ -586,6 +678,25 @@
 
   // ---- helpers ----
   function clamp(v, lo, hi) { return Math.max(lo, Math.min(hi, v)); }
+
+  // A compact "magma"-style perceptual ramp (dark purple → magenta → orange →
+  // pale yellow): reads well on the dark panel and keeps loud harmonics bright.
+  // t in [0,1] → [r,g,b]. Piecewise-linear over a handful of control stops.
+  const MAGMA = [
+    [0, 0, 4], [40, 11, 84], [101, 21, 110], [159, 42, 99],
+    [212, 72, 66], [245, 125, 21], [252, 193, 66], [252, 253, 191],
+  ];
+  function magma(t) {
+    const x = clamp(t, 0, 1) * (MAGMA.length - 1);
+    const i = Math.min(MAGMA.length - 2, Math.floor(x));
+    const f = x - i;
+    const a = MAGMA[i], b = MAGMA[i + 1];
+    return [
+      Math.round(a[0] + (b[0] - a[0]) * f),
+      Math.round(a[1] + (b[1] - a[1]) * f),
+      Math.round(a[2] + (b[2] - a[2]) * f),
+    ];
+  }
   // Snap `v` to the nearest multiple of `step` (semitones), rounding away tiny
   // floating-point residue so e.g. a 5-cent grid yields exact 0.05 multiples.
   function snapToStep(v, step) {

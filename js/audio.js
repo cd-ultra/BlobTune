@@ -26,6 +26,15 @@
       this.startOffset = 0;   // seconds into the track at play start
       this.duration = 0;
       this.onEnded = null;
+      // Lock the source formant envelope onto pitch-shifted notes (keeps vocal
+      // timbre; avoids the chipmunk/dark colour of large shifts). Toggleable.
+      this.preserveFormants = true;
+    }
+
+    /** Enable/disable formant preservation on pitch shifts; forces a re-render. */
+    setPreserveFormants(on) {
+      const v = !!on;
+      if (v !== this.preserveFormants) { this.preserveFormants = v; this.dirty = true; }
     }
 
     _ensureCtx() {
@@ -155,7 +164,7 @@
         if (n.pitchOffset && srcLen >= 64) {
           const ratio = Math.pow(2, n.pitchOffset / 12);
           const freq = global.Pitch.midiToFreq(n.detectedMidi);
-          seg = pitchShift(seg, ratio, sr, freq);
+          seg = pitchShift(seg, ratio, sr, freq, this.preserveFormants);
         }
         // Time-stretch to the note's target duration (changes the timeline).
         // `seg` is now at the EDITED pitch, so drive the pitch-synchronous
@@ -321,6 +330,103 @@
     return w;
   }
 
+  // ---- Formant (spectral-envelope) preservation ----
+
+  /**
+   * Re-impose the SOURCE segment's formant envelope onto a pitch-shifted signal.
+   *
+   * TD-PSOLA already keeps formants roughly in place (that's its edge over plain
+   * resampling), but on large shifts the residual drift is audible — up-shifts
+   * brighten toward "chipmunk", down-shifts darken — and the OLA/resample
+   * fallback shifts formants outright. This stage locks the timbre: for each
+   * short STFT frame (source and shifted are the same length, so they line up in
+   * time) it estimates the smooth spectral envelope of both via low-quefrency
+   * cepstral liftering, then scales the shifted spectrum bin-by-bin by
+   *
+   *     gain(f) = envSource(f) / envShifted(f)
+   *
+   * and overlap-adds the result. The lifter cutoff sits BELOW the pitch period,
+   * so each envelope captures formants but not the harmonic fine structure —
+   * the gain is therefore smooth in frequency and moves formants back to where
+   * the source had them WITHOUT disturbing the (already shifted) pitch. When the
+   * shifter preserved the envelope well, envShifted ≈ envSource and the gain is
+   * ≈1 (a near no-op), so this only corrects real drift.
+   *
+   * Cepstral envelope: E(f) = exp(lifter{ real-cepstrum{ log|X(f)| } }), where
+   * the lifter keeps only quefrencies below the fundamental period P.
+   */
+  function preserveFormants(shifted, source, sampleRate, freq) {
+    const P = Math.max(1, Math.round(sampleRate / freq));
+    // FFT frame: a power of two spanning several periods for a stable envelope.
+    let frame = 512;
+    while (frame < 4 * P) frame <<= 1;
+    if (frame > 4096) frame = 4096;
+    const n = shifted.length;
+    if (n < frame) return shifted;               // too short to estimate an envelope
+
+    const hop = frame >> 2;                       // 75% overlap
+    const win = hann(frame);
+    // Lifter cutoff (quefrency, in samples): below the pitch period so we keep
+    // the formant envelope but drop the pitch rahmonic. Clamped to a sane band.
+    const lifter = Math.min((frame >> 1) - 1, Math.max(16, Math.round(P * 0.5)));
+    const GMIN = 0.25, GMAX = 4;                   // clamp correction to ±12 dB
+
+    const out = new Float32Array(n);
+    const norm = new Float32Array(n);
+
+    // Reused per-frame scratch.
+    const Hre = new Float64Array(frame), Him = new Float64Array(frame);
+    const Sre = new Float64Array(frame), Sim = new Float64Array(frame);
+    const cr = new Float64Array(frame), ci = new Float64Array(frame);
+    const envS = new Float64Array(frame), envH = new Float64Array(frame);
+
+    // Smooth magnitude envelope of the spectrum (re,im), written into `env`.
+    // Uses cr/ci as scratch; leaves re/im untouched.
+    const envelope = (re, im, env) => {
+      for (let k = 0; k < frame; k++) {
+        const mag = Math.sqrt(re[k] * re[k] + im[k] * im[k]);
+        cr[k] = Math.log(mag + 1e-8);
+        ci[k] = 0;
+      }
+      global.FFT.inverse(cr, ci);                 // real cepstrum in cr
+      for (let q = lifter + 1; q < frame - lifter; q++) cr[q] = 0;  // keep low quefrency
+      for (let q = 0; q < frame; q++) ci[q] = 0;
+      global.FFT.transform(cr, ci);               // back to smoothed log-magnitude
+      for (let k = 0; k < frame; k++) env[k] = Math.exp(cr[k]);
+    };
+
+    for (let pos = 0; pos + frame <= n; pos += hop) {
+      for (let i = 0; i < frame; i++) {
+        const w = win[i];
+        Sre[i] = source[pos + i] * w; Sim[i] = 0;
+        Hre[i] = shifted[pos + i] * w; Him[i] = 0;
+      }
+      global.FFT.transform(Sre, Sim);
+      global.FFT.transform(Hre, Him);
+      envelope(Sre, Sim, envS);
+      envelope(Hre, Him, envH);
+      // Scale the shifted spectrum toward the source envelope (real gain keeps
+      // the spectrum conjugate-symmetric, so the inverse stays real).
+      for (let k = 0; k < frame; k++) {
+        let g = envS[k] / (envH[k] + 1e-8);
+        if (g < GMIN) g = GMIN; else if (g > GMAX) g = GMAX;
+        Hre[k] *= g; Him[k] *= g;
+      }
+      global.FFT.inverse(Hre, Him);               // back to time domain (real in Hre)
+      for (let i = 0; i < frame; i++) {
+        const w = win[i];
+        out[pos + i] += Hre[i] * w;
+        norm[pos + i] += w * w;
+      }
+    }
+    // Weighted-overlap-add normalize; keep the raw shifted signal at the
+    // uncovered head/tail so edges never drop out.
+    for (let i = 0; i < n; i++) {
+      out[i] = norm[i] > 1e-6 ? out[i] / norm[i] : shifted[i];
+    }
+    return out;
+  }
+
   /**
    * Time-stretch a signal by `factor` (output length ≈ input.length * factor)
    * using fixed-hop overlap-add with a Hann window. Pitch is preserved.
@@ -478,14 +584,17 @@
   /**
    * Pitch-shift by `ratio` (e.g. 2^(semitones/12)) preserving duration.
    * Uses TD-PSOLA when a usable fundamental is known (clean, monophonic);
-   * otherwise falls back to OLA time-stretch + resample.
+   * otherwise falls back to OLA time-stretch + resample. When `formants` is set
+   * (and a fundamental is known), the source's spectral envelope is locked onto
+   * the result so the vocal timbre is kept even on large shifts.
    */
-  function pitchShift(segment, ratio, sampleRate, freq) {
+  function pitchShift(segment, ratio, sampleRate, freq, formants) {
     if (Math.abs(ratio - 1) < 1e-4) return Float32Array.from(segment);
     const P = freq > 0 ? Math.round(sampleRate / freq) : 0;
     // PSOLA needs at least a couple of periods of context inside the segment.
     if (P >= 4 && segment.length >= 4 * P) {
-      return psolaShift(segment, sampleRate, freq, ratio);
+      const shifted = psolaShift(segment, sampleRate, freq, ratio);
+      return formants ? preserveFormants(shifted, segment, sampleRate, freq) : shifted;
     }
     const stretched = timeStretch(segment, ratio);
     return resampleTo(stretched, segment.length);
@@ -535,5 +644,5 @@
   }
 
   global.AudioEngine = AudioEngine;
-  global.DSP = { timeStretch, stretchTo, psolaStretch, resampleTo, pitchShift, psolaShift, encodeWavPCM16 };
+  global.DSP = { timeStretch, stretchTo, psolaStretch, resampleTo, pitchShift, psolaShift, preserveFormants, encodeWavPCM16 };
 })(typeof window !== 'undefined' ? window : globalThis);
