@@ -55,6 +55,22 @@
   }
 
   /**
+   * In-place inverse FFT. `re`/`im` are the transform of a length-N (power of
+   * two) sequence; on return they hold the reconstructed samples, scaled by 1/N
+   * so that inverse(transform(x)) === x. Implemented via the standard
+   * conjugate → forward → conjugate/scale identity, so it reuses `transform`.
+   * Used by the cepstral formant-envelope estimator in audio.js.
+   */
+  function inverse(re, im) {
+    const n = re.length;
+    if (n <= 1) return;
+    for (let i = 0; i < n; i++) im[i] = -im[i];
+    transform(re, im);
+    const inv = 1 / n;
+    for (let i = 0; i < n; i++) { re[i] *= inv; im[i] = -im[i] * inv; }
+  }
+
+  /**
    * Magnitude spectrum (bins 0..N/2-1) of a real frame of power-of-two length.
    * Allocates scratch each call — for hot loops use `transform` with reused
    * buffers instead. `out` is optional (reused if provided).
@@ -71,5 +87,5 @@
     return out;
   }
 
-  global.FFT = { transform, magnitude };
+  global.FFT = { transform, inverse, magnitude };
 })(typeof window !== 'undefined' ? window : globalThis);

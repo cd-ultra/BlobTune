@@ -29,6 +29,8 @@
   let meterAnalyser = null;  // AnalyserNode
   let meterData = null;      // time-domain sample buffer
   let meterRaf = null;       // RAF id for the meter loop
+  let spectro = null;        // cached Spectrogram.compute() result for the loaded audio
+  let spectroDirty = true;   // recompute the spectrogram on next show (audio changed)
 
   const els = {
     canvas: document.getElementById('piano-roll'),
@@ -44,6 +46,8 @@
     scaleType: document.getElementById('scale-type'),
     snap: document.getElementById('btn-snap'),
     stepSize: document.getElementById('step-size'),
+    formants: document.getElementById('btn-formants'),
+    spectro: document.getElementById('btn-spectro'),
     saveProject: document.getElementById('btn-save-project'),
     projectInput: document.getElementById('project-input'),
     undo: document.getElementById('btn-undo'),
@@ -86,6 +90,8 @@
       setStatus('Pitch step set to ' + els.stepSize.options[els.stepSize.selectedIndex].text +
         '. Arrow ↑/↓ or drag a blob to nudge the selected note by this amount.');
     });
+    els.formants.addEventListener('click', toggleFormants);
+    els.spectro.addEventListener('click', toggleSpectrogram);
     els.undo.addEventListener('click', doUndo);
     els.redo.addEventListener('click', doRedo);
     els.zoomIn.addEventListener('click', () => renderer.zoom(1.3, 'x'));
@@ -196,6 +202,7 @@
         engine.markDirty();
         renderer.setNotes(notes, engine.layout());
         renderer.setPlayhead(0);
+        invalidateSpectrogram();
         hideLoading();
         setStatus('Imported ' + notes.length + ' notes from "' + file.name +
           '" (tone preview synthesized). Retune, play, or export WAV/MIDI.');
@@ -442,6 +449,7 @@
       engine.markDirty();
       renderer.setNotes(notes, engine.layout());
       renderer.setPlayhead(0);
+      invalidateSpectrogram();
       hideLoading();
       if (!notes.length) {
         setStatus(doneMsg + ' — but no clear pitches were detected. Try a louder, cleaner, single-note ' +
@@ -578,6 +586,52 @@
   function onKeyPlay(midi) {
     engine.previewMidi(midi);
     setStatus('♪ ' + Pitch.midiToName(midi) + ' — click keys on the left to hear pitches.');
+  }
+
+  // ---------- view / DSP toggles ----------
+  // Formant preservation: keep the source's vocal timbre when pitch shifting.
+  // Toggling forces the engine to re-render (edited buffer) on the next play/export.
+  function toggleFormants() {
+    const on = !engine.preserveFormants;
+    engine.setPreserveFormants(on);
+    els.formants.classList.toggle('active', on);
+    els.formants.setAttribute('aria-pressed', on ? 'true' : 'false');
+    setStatus(on
+      ? 'Formant preservation ON — pitch-shifted notes keep their original timbre (re-render on next play/export).'
+      : 'Formant preservation OFF — pure TD-PSOLA; large shifts may colour the timbre.');
+  }
+
+  // Spectrogram underlay: compute lazily the first time it's shown for the
+  // current audio, then just toggle visibility.
+  function toggleSpectrogram() {
+    const on = !renderer.showSpectrogram;
+    if (on) ensureSpectrogram();
+    renderer.setShowSpectrogram(on);
+    els.spectro.classList.toggle('active', on);
+    els.spectro.setAttribute('aria-pressed', on ? 'true' : 'false');
+    setStatus(on
+      ? 'Spectrogram shown — the harmonics, vibrato and noise behind each blob (frequency on the same pitch axis).'
+      : 'Spectrogram hidden.');
+  }
+
+  // Compute (once) and hand the spectrogram to the renderer.
+  function ensureSpectrogram() {
+    const mono = engine.getMono();
+    if (!mono || !mono.length) { spectro = null; renderer.setSpectrogram(null); return; }
+    if (spectroDirty || !spectro) {
+      spectro = Spectrogram.compute(mono, engine.sampleRate);
+      spectroDirty = false;
+    }
+    renderer.setSpectrogram(spectro);
+  }
+
+  // The loaded audio changed: drop the cached spectrogram. Recompute now if it's
+  // currently visible, otherwise clear the stale overlay and defer.
+  function invalidateSpectrogram() {
+    spectro = null;
+    spectroDirty = true;
+    if (renderer.showSpectrogram) ensureSpectrogram();
+    else renderer.setSpectrogram(null);
   }
 
   function resetEdits() {
@@ -812,6 +866,7 @@
             engine.markDirty();
             renderer.setNotes(notes, engine.layout());
             renderer.setPlayhead(0);
+            invalidateSpectrogram();
             clearHistory();   // a loaded project starts a fresh undo history
             hideLoading();
             const edits = notes.filter((n) => n.pitchOffset).length;
