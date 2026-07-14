@@ -125,12 +125,13 @@
         const ns0 = clampInt(Math.floor(n.srcStart * sr), 0, dryLen);
         const ns1 = clampInt(Math.floor(n.srcEnd * sr), 0, dryLen);
         cursor += Math.max(0, ns0 - dryPos);          // inter-note gap (unchanged)
-        const srcLen = Math.max(0, ns1 - ns0);
+        const a0 = Math.max(ns0, dryPos);             // match _renderEdited's overlap clamp
+        const srcLen = Math.max(0, ns1 - a0);
         const targetLen = this._noteTargetLen(srcLen, n.stretch);
         n.startTime = cursor / sr;
         n.endTime = (cursor + targetLen) / sr;
         cursor += targetLen;
-        dryPos = ns1;
+        dryPos = Math.max(dryPos, ns1);
       }
       cursor += Math.max(0, dryLen - dryPos);          // trailing audio
       this.duration = cursor / sr;
@@ -155,24 +156,39 @@
         const ns0 = clampInt(Math.floor(n.srcStart * sr), 0, dryLen);
         const ns1 = clampInt(Math.floor(n.srcEnd * sr), 0, dryLen);
         if (ns0 > dryPos) { parts.push(dry.subarray(dryPos, ns0)); cursor += ns0 - dryPos; }
-        dryPos = Math.max(dryPos, ns1);
-        const srcLen = Math.max(0, ns1 - ns0);
+        const a0 = Math.max(ns0, dryPos);   // never re-emit audio already copied
+        dryPos = Math.max(dryPos, ns1);      // (padded note ranges can overlap)
+        const srcLen = Math.max(0, ns1 - a0);
         if (srcLen <= 0) { n.startTime = cursor / sr; n.endTime = cursor / sr; continue; }
 
-        let seg = dry.slice(ns0, ns1);
+        const edited = (n.pitchOffset && srcLen >= 64) ||
+                       (n.stretch != null && Math.abs(n.stretch - 1) > 1e-6);
+        if (!edited) {
+          // Unedited note: keep the dry audio verbatim (no processing, no fade)
+          // so it is bit-exact and joins its neighbours without a click — this is
+          // what keeps un-retuned audio from sounding like a scratchy phonograph.
+          const seg = dry.subarray(a0, ns1);
+          n.startTime = cursor / sr;
+          n.endTime = (cursor + seg.length) / sr;
+          parts.push(seg);
+          cursor += seg.length;
+          continue;
+        }
+
+        let seg = dry.slice(a0, ns1);
         // Pitch shift (preserves length) using the note's detected fundamental.
         if (n.pitchOffset && srcLen >= 64) {
           const ratio = Math.pow(2, n.pitchOffset / 12);
           const freq = global.Pitch.midiToFreq(n.detectedMidi);
           seg = pitchShift(seg, ratio, sr, freq, this.preserveFormants);
         }
-        // Time-stretch to the note's target duration (changes the timeline).
-        // `seg` is now at the EDITED pitch, so drive the pitch-synchronous
-        // stretch with the edited fundamental for clean, non-robotic sustain.
+        // Time-stretch to the note's target duration (changes the timeline),
+        // driven by the edited fundamental for clean, non-robotic sustain.
         const targetLen = this._noteTargetLen(srcLen, n.stretch);
         if (targetLen !== seg.length) seg = stretchTo(seg, targetLen, sr, global.Pitch.midiToFreq(n.midi));
-        // Short fades at the seams so concatenation doesn't click.
-        edgeFade(seg, Math.min(64, Math.floor(seg.length / 8)));
+        // Crossfade the processed segment's head/tail into the ORIGINAL dry note
+        // edges so an edited note joins its neighbours with no seam click.
+        seamBlend(seg, dry, a0, ns1, Math.min(220, srcLen >> 2, seg.length >> 1));
 
         n.startTime = cursor / sr;
         n.endTime = (cursor + seg.length) / sr;
@@ -460,16 +476,24 @@
 
   function clampInt(v, lo, hi) { return v < lo ? lo : v > hi ? hi : v; }
 
-  /** Apply a short linear fade-in and fade-out (in place) to soften seams. */
-  function edgeFade(buf, fade) {
-    if (!fade || fade < 1) return buf;
-    const n = buf.length;
-    for (let i = 0; i < fade && i < n; i++) {
-      const g = i / fade;
-      buf[i] *= g;
-      buf[n - 1 - i] *= g;
+  /**
+   * Crossfade a processed segment's head and tail into the ORIGINAL dry note's
+   * first/last `cf` samples (in place). The head blends dry→seg and the tail
+   * blends seg→dry, so the segment starts exactly like the preceding audio and
+   * ends exactly like the following audio — no seam click — without dipping to
+   * silence the way a plain fade-to-zero would.
+   */
+  function seamBlend(seg, dry, ns0, ns1, cf) {
+    cf = Math.floor(cf);
+    if (cf < 2) return seg;
+    const n = seg.length;
+    for (let i = 0; i < cf; i++) {
+      const g = i / cf;
+      seg[i] = dry[ns0 + i] * (1 - g) + seg[i] * g;             // head: dry -> seg
+      const j = n - cf + i;
+      seg[j] = seg[j] * (1 - g) + dry[ns1 - cf + i] * g;         // tail: seg -> dry
     }
-    return buf;
+    return seg;
   }
 
   /**
